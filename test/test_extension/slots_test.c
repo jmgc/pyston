@@ -179,13 +179,18 @@ slots_testeriter_init(PyObject *self, PyObject *args, PyObject *kwds)
     return 0;
 }
 
+void iter_dealloc(slots_tester_iterobj* obj) {
+    Py_XDECREF(obj->obj);
+    Py_TYPE(obj)->tp_free(obj);
+}
+
 static PyTypeObject slots_tester_seqiter = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "slots_test.slots_tester_seqiter",            /* tp_name */
     sizeof(slots_tester_iterobj),          /* tp_basicsize */
     0,                                  /* tp_itemsize */
     /* methods */
-    0,                                  /* tp_dealloc */
+    (destructor)iter_dealloc,                                  /* tp_dealloc */
     0,                                  /* tp_print */
     0,                                  /* tp_getattr */
     0,                                  /* tp_setattr */
@@ -295,13 +300,18 @@ static PyMappingMethods slots_tester_map_asmapping = {
     (objobjargproc)slots_tester_map_ass_sub,       /*mp_ass_subscript*/
 };
 
+void map_dealloc(slots_tester_object* obj) {
+    Py_XDECREF(obj->dict);
+    Py_TYPE(obj)->tp_free(obj);
+}
+
 static PyTypeObject slots_tester_map= {
     PyVarObject_HEAD_INIT(NULL, 0)
     "slots_test.slots_tester_map",            /* tp_name */
     sizeof(slots_tester_object),          /* tp_basicsize */
     0,                                  /* tp_itemsize */
     /* methods */
-    0,                                  /* tp_dealloc */
+    (destructor)map_dealloc,                                  /* tp_dealloc */
     0,                                  /* tp_print */
     0,                                  /* tp_getattr */
     0,                                  /* tp_setattr */
@@ -316,7 +326,7 @@ static PyTypeObject slots_tester_map= {
     0,                                  /* tp_getattro */
     0,                                  /* tp_setattro */
     0,                                  /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT,                 /* tp_flags */
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,                 /* tp_flags */
     0,                   /* tp_doc */
     0,                                  /* tp_traverse */
     0,                                  /* tp_clear */
@@ -344,6 +354,11 @@ static PyTypeObject slots_tester_map= {
 static PyObject* N(slots_tester_object* lhs) { \
     printf(PYSTON_STRINGIFY(N) ", %d\n", lhs->n); \
     Py_INCREF(R); \
+    return (PyObject*)R; \
+}
+#define CREATE_UN_NOINCREF(N, R) \
+static PyObject* N(slots_tester_object* lhs) { \
+    printf(PYSTON_STRINGIFY(N) ", %d\n", lhs->n); \
     return (PyObject*)R; \
 }
 
@@ -385,9 +400,9 @@ CREATE_BIN(s_or);
 
 CREATE_UN(s_int, Py_True);
 CREATE_UN(s_long, Py_True);
-CREATE_UN(s_float, PyFloat_FromDouble(1.0));
-CREATE_UN(s_oct, PyString_FromString("oct"));
-CREATE_UN(s_hex, PyString_FromString("hex"));
+CREATE_UN_NOINCREF(s_float, PyFloat_FromDouble(1.0));
+CREATE_UN_NOINCREF(s_oct, PyString_FromString("oct"));
+CREATE_UN_NOINCREF(s_hex, PyString_FromString("hex"));
 
 #undef CREATE_BIN
 
@@ -652,7 +667,9 @@ call_funcs(PyObject* _module, PyObject* args) {
     }
 
     if (cls->tp_new) {
-        PyObject* rtn = cls->tp_new(cls, PyTuple_New(0), PyDict_New());
+        PyObject* args = PyTuple_New(0);
+        PyObject* rtn = cls->tp_new(cls, args, NULL);
+        Py_DECREF(args);
         if (!rtn) {
             printf("tp_new_exists but returned an error!\n");
             PyErr_Print();
@@ -665,25 +682,25 @@ call_funcs(PyObject* _module, PyObject* args) {
     if (cls->tp_new) {
         printf("tp_new exists\n");
     } else {
-        printf("tp_new doesnt exist\n");
+        printf("tp_new doesn't exist\n");
     }
 
     if (cls->tp_init) {
         printf("tp_init exists\n");
     } else {
-        printf("tp_init doesnt exist\n");
+        printf("tp_init doesn't exist\n");
     }
 
     if (cls->tp_call) {
         printf("tp_call exists\n");
     } else {
-        printf("tp_call doesnt exist\n");
+        printf("tp_call doesn't exist\n");
     }
 
     if (cls->tp_getattr) {
         printf("tp_getattr exists\n");
     } else {
-        printf("tp_getattr doesnt exist\n");
+        printf("tp_getattr doesn't exist\n");
     }
 
     // we aren't checking for tp_getattro.  it's set in cpython and not in pyston
@@ -691,7 +708,7 @@ call_funcs(PyObject* _module, PyObject* args) {
     if (cls->tp_setattr) {
         printf("tp_setattr exists\n");
     } else {
-        printf("tp_setattr doesnt exist\n");
+        printf("tp_setattr doesn't exist\n");
     }
 
     // we aren't checking for tp_setattro.  it's set in cpython and not in pyston
@@ -699,7 +716,7 @@ call_funcs(PyObject* _module, PyObject* args) {
     if (cls->tp_descr_get) {
         printf("tp_descr_get exists\n");
     } else {
-        printf("tp_descr_get doesnt exist\n");
+        printf("tp_descr_get doesn't exist\n");
     }
 
     if (cls->tp_as_mapping) {
@@ -707,7 +724,9 @@ call_funcs(PyObject* _module, PyObject* args) {
         PyMappingMethods* map = cls->tp_as_mapping;
 
         if (map->mp_subscript) {
-            PyObject* rtn = map->mp_subscript(obj, PyInt_FromLong(1));
+            PyObject* arg = PyInt_FromLong(1);
+            PyObject* rtn = map->mp_subscript(obj, arg);
+            Py_DECREF(arg);
             printf("mp_subscript exists and returned\n");
             Py_DECREF(rtn);
         } else {
@@ -719,7 +738,7 @@ call_funcs(PyObject* _module, PyObject* args) {
             printf("mp_length exists and returned %ld\n", rtn);
         }
     } else {
-        printf("tp_as_mapping doesnt exist\n");
+        printf("tp_as_mapping doesn't exist\n");
     }
 
     if (cls->tp_as_sequence) {
@@ -737,7 +756,7 @@ call_funcs(PyObject* _module, PyObject* args) {
             Py_DECREF(rtn);
         }
     } else {
-        printf("tp_as_sequence doesnt exist\n");
+        printf("tp_as_sequence doesn't exist\n");
     }
 
     if (cls->tp_as_number) {
@@ -800,14 +819,31 @@ call_funcs(PyObject* _module, PyObject* args) {
 #undef CHECK_BIN
 
     } else {
-        printf("tp_as_number doesnt exist\n");
+        printf("tp_as_number doesn't exist\n");
     }
 
     Py_RETURN_NONE;
 }
 
+static PyObject *
+view_tp_as(PyObject* _module, PyObject* _type) {
+    assert(PyType_Check(_type));
+    PyTypeObject* type = (PyTypeObject*)_type;
+
+    printf("%s:", type->tp_name);
+    if (type->tp_as_number)
+        printf(" tp_as_number");
+    if (type->tp_as_sequence)
+        printf(" tp_as_sequence");
+    if (type->tp_as_mapping)
+        printf(" tp_as_mapping");
+    printf("\n");
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef SlotsMethods[] = {
     {"call_funcs", call_funcs, METH_VARARGS, "Call slotted functions."},
+    {"view_tp_as", view_tp_as, METH_O, "Check which tp_as_ slots are defined."},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
@@ -853,13 +889,22 @@ initslots_test(void)
         return;
 
     // Not sure if the result of PyInt_FromLong needs to be decref'd
-    PyDict_SetItemString(slots_tester_seq.tp_dict, "set_through_tpdict", PyInt_FromLong(123));
+    PyObject* num = PyInt_FromLong(123);
+    PyDict_SetItemString(slots_tester_seq.tp_dict, "set_through_tpdict", num);
+    Py_DECREF(num);
 
+    Py_INCREF(&slots_tester_seq);
     PyModule_AddObject(m, "SlotsTesterSeq", (PyObject *)&slots_tester_seq);
+    Py_INCREF(&slots_tester_map);
     PyModule_AddObject(m, "SlotsTesterMap", (PyObject *)&slots_tester_map);
+    Py_INCREF(&slots_tester_num);
     PyModule_AddObject(m, "SlotsTesterNum", (PyObject *)&slots_tester_num);
+    Py_INCREF(&slots_tester_sub);
     PyModule_AddObject(m, "SlotsTesterSub", (PyObject *)&slots_tester_sub);
+    Py_INCREF(&slots_tester_nonsubclassable);
     PyModule_AddObject(m, "SlotsTesterNonsubclassable", (PyObject *)&slots_tester_nonsubclassable);
+    Py_INCREF(&slots_tester_nullreturngetattr);
     PyModule_AddObject(m, "SlotsTesterNullReturnGetAttr", (PyObject *)&slots_tester_nullreturngetattr);
+    Py_INCREF(&slots_tester_descrget);
     PyModule_AddObject(m, "SlotsTesterDescrGet", (PyObject *)&slots_tester_descrget);
 }

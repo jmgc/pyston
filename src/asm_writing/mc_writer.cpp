@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -121,10 +121,6 @@ private:
     int pops_required;
 
     inline void _emitByte(uint8_t b) {
-        if (TRAP) {
-            printf(" %02x", b);
-            fflush(stdout);
-        }
         assert(addr < end_addr);
         *addr++ = b;
     }
@@ -422,7 +418,7 @@ private:
         _emitByte(0x39);
         if (displacement == 0) {
             // Since we're emitting into a fixed-size section I guess there might not be
-            // too much benifit to the more compact encoding, but it makes me feel better:
+            // too much benefit to the more compact encoding, but it makes me feel better:
             _emitModRM(0b00, reg1, reg2);
         } else {
             _emitModRM(0b01, reg1, reg2);

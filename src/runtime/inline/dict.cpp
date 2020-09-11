@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,34 +19,37 @@
 
 namespace pyston {
 
-BoxedDictIterator::BoxedDictIterator(BoxedDict* d, IteratorType type)
-    : d(d), it(d->d.begin()), itEnd(d->d.end()), type(type) {
+BoxedDictIterator::BoxedDictIterator(BoxedDict* d) : d(d), it(d->d.begin()), itEnd(d->d.end()) {
+    Py_INCREF(d);
+}
+
+Box* dict_iter(Box* s) noexcept {
+    assert(PyDict_Check(s));
+    BoxedDict* self = static_cast<BoxedDict*>(s);
+    return new (&PyDictIterKey_Type, FAST_GC) BoxedDictIterator(self);
 }
 
 Box* dictIterKeys(Box* s) {
-    assert(isSubclass(s->cls, dict_cls));
-    BoxedDict* self = static_cast<BoxedDict*>(s);
-    return new BoxedDictIterator(self, BoxedDictIterator::KeyIterator);
+    return dict_iter(s);
 }
 
 Box* dictIterValues(Box* s) {
-    assert(isSubclass(s->cls, dict_cls));
+    assert(PyDict_Check(s));
     BoxedDict* self = static_cast<BoxedDict*>(s);
-    return new BoxedDictIterator(self, BoxedDictIterator::ValueIterator);
+    return new (&PyDictIterValue_Type, FAST_GC) BoxedDictIterator(self);
 }
 
 Box* dictIterItems(Box* s) {
-    assert(isSubclass(s->cls, dict_cls));
+    assert(PyDict_Check(s));
     BoxedDict* self = static_cast<BoxedDict*>(s);
-    return new BoxedDictIterator(self, BoxedDictIterator::ItemIterator);
+    return new (&PyDictIterItem_Type, FAST_GC) BoxedDictIterator(self);
 }
 
 Box* dictIterIter(Box* s) {
-    return s;
+    return incref(s);
 }
 
-i1 dictIterHasnextUnboxed(Box* s) {
-    assert(s->cls == dict_iterator_cls);
+llvm_compat_bool dictIterHasnextUnboxed(Box* s) {
     BoxedDictIterator* self = static_cast<BoxedDictIterator*>(s);
 
     return self->it != self->itEnd;
@@ -56,43 +59,30 @@ Box* dictIterHasnext(Box* s) {
     return boxBool(dictIterHasnextUnboxed(s));
 }
 
-Box* dictIterNext(Box* s) {
-    assert(s->cls == dict_iterator_cls);
+Box* dictiter_next(Box* s) noexcept {
     BoxedDictIterator* self = static_cast<BoxedDictIterator*>(s);
 
     if (self->it == self->itEnd)
-        raiseExcHelper(StopIteration, "");
+        return NULL;
 
     Box* rtn = nullptr;
-    if (self->type == BoxedDictIterator::KeyIterator) {
-        rtn = self->it->first;
-    } else if (self->type == BoxedDictIterator::ValueIterator) {
-        rtn = self->it->second;
-    } else if (self->type == BoxedDictIterator::ItemIterator) {
-        rtn = BoxedTuple::create({ self->it->first, self->it->second });
+    if (self->cls == &PyDictIterKey_Type) {
+        rtn = incref(self->it->first.value);
+    } else if (self->cls == &PyDictIterValue_Type) {
+        rtn = incref(self->it->second);
+    } else if (self->cls == &PyDictIterItem_Type) {
+        rtn = BoxedTuple::create({ self->it->first.value, self->it->second });
+    } else {
+        RELEASE_ASSERT(0, "");
     }
     ++self->it;
     return rtn;
 }
 
-BoxedDictView::BoxedDictView(BoxedDict* d) : d(d) {
-}
-
-Box* dictViewKeysIter(Box* s) {
-    assert(s->cls == dict_keys_cls);
-    BoxedDictView* self = static_cast<BoxedDictView*>(s);
-    return dictIterKeys(self->d);
-}
-
-Box* dictViewValuesIter(Box* s) {
-    assert(s->cls == dict_values_cls);
-    BoxedDictView* self = static_cast<BoxedDictView*>(s);
-    return dictIterValues(self->d);
-}
-
-Box* dictViewItemsIter(Box* s) {
-    assert(s->cls == dict_items_cls);
-    BoxedDictView* self = static_cast<BoxedDictView*>(s);
-    return dictIterItems(self->d);
+Box* dictIterNext(Box* s) {
+    auto* rtn = dictiter_next(s);
+    if (!rtn)
+        raiseExcHelper(StopIteration, "");
+    return rtn;
 }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,33 +17,38 @@
 #include <string.h>
 
 #include "Python.h"
+#include "pythread.h"
+
+#include "codegen/cpython_ast.h"
+#include "grammar.h"
+#include "node.h"
+#include "token.h"
+#include "parsetok.h"
+#include "errcode.h"
+#include "ast.h"
+#undef BYTE
+#undef STRING
 
 #include "llvm/Support/ErrorHandling.h" // For llvm_unreachable
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 
+#include "capi/typeobject.h"
 #include "capi/types.h"
+#include "codegen/irgen/hooks.h"
 #include "codegen/unwinding.h"
+#include "core/ast.h"
 #include "core/threading.h"
 #include "core/types.h"
 #include "runtime/classobj.h"
-#include "runtime/file.h"
 #include "runtime/import.h"
 #include "runtime/objmodel.h"
 #include "runtime/rewrite_args.h"
-#include "runtime/traceback.h"
 #include "runtime/types.h"
 
 namespace pyston {
 
-BoxedClass* method_cls;
-
-extern "C" bool _PyIndex_Check(PyObject* obj) noexcept {
-    return (Py_TYPE(obj)->tp_as_number != NULL && PyType_HasFeature(Py_TYPE(obj), Py_TPFLAGS_HAVE_INDEX)
-            && Py_TYPE(obj)->tp_as_number->nb_index != NULL);
-}
-
-extern "C" bool _PyObject_CheckBuffer(PyObject* obj) noexcept {
+extern "C" int _PyObject_CheckBuffer(PyObject* obj) noexcept {
     return ((Py_TYPE(obj)->tp_as_buffer != NULL) && (PyType_HasFeature(Py_TYPE(obj), Py_TPFLAGS_HAVE_NEWBUFFER))
             && (Py_TYPE(obj)->tp_as_buffer->bf_getbuffer != NULL));
 }
@@ -53,156 +58,6 @@ int Py_Py3kWarningFlag;
 
 BoxedClass* capifunc_cls;
 }
-
-extern "C" void _PyErr_BadInternalCall(const char* filename, int lineno) noexcept {
-    Py_FatalError("unimplemented");
-}
-
-extern "C" PyObject* PyObject_Format(PyObject* obj, PyObject* format_spec) noexcept {
-    PyObject* empty = NULL;
-    PyObject* result = NULL;
-#ifdef Py_USING_UNICODE
-    int spec_is_unicode;
-    int result_is_unicode;
-#endif
-
-    /* If no format_spec is provided, use an empty string */
-    if (format_spec == NULL) {
-        empty = PyString_FromStringAndSize(NULL, 0);
-        format_spec = empty;
-    }
-
-/* Check the format_spec type, and make sure it's str or unicode */
-#ifdef Py_USING_UNICODE
-    if (PyUnicode_Check(format_spec))
-        spec_is_unicode = 1;
-    else if (PyString_Check(format_spec))
-        spec_is_unicode = 0;
-    else {
-#else
-    if (!PyString_Check(format_spec)) {
-#endif
-        PyErr_Format(PyExc_TypeError, "format expects arg 2 to be string "
-                                      "or unicode, not %.100s",
-                     Py_TYPE(format_spec)->tp_name);
-        goto done;
-    }
-
-    /* Check for a __format__ method and call it. */
-    if (PyInstance_Check(obj)) {
-        /* We're an instance of a classic class */
-        PyObject* bound_method = PyObject_GetAttrString(obj, "__format__");
-        if (bound_method != NULL) {
-            result = PyObject_CallFunctionObjArgs(bound_method, format_spec, NULL);
-            Py_DECREF(bound_method);
-        } else {
-            PyObject* self_as_str = NULL;
-            PyObject* format_method = NULL;
-            Py_ssize_t format_len;
-
-            PyErr_Clear();
-/* Per the PEP, convert to str (or unicode,
-   depending on the type of the format
-   specifier).  For new-style classes, this
-   logic is done by object.__format__(). */
-#ifdef Py_USING_UNICODE
-            if (spec_is_unicode) {
-                format_len = PyUnicode_GET_SIZE(format_spec);
-                self_as_str = PyObject_Unicode(obj);
-            } else
-#endif
-            {
-                format_len = PyString_GET_SIZE(format_spec);
-                self_as_str = PyObject_Str(obj);
-            }
-            if (self_as_str == NULL)
-                goto done1;
-
-            if (format_len > 0) {
-                /* See the almost identical code in
-                   typeobject.c for new-style
-                   classes. */
-                if (PyErr_WarnEx(PyExc_PendingDeprecationWarning, "object.__format__ with a non-empty "
-                                                                  "format string is deprecated",
-                                 1) < 0) {
-                    goto done1;
-                }
-                /* Eventually this will become an
-                   error:
-                PyErr_Format(PyExc_TypeError,
-                   "non-empty format string passed to "
-                   "object.__format__");
-                goto done1;
-                */
-            }
-
-            /* Then call str.__format__ on that result */
-            format_method = PyObject_GetAttrString(self_as_str, "__format__");
-            if (format_method == NULL) {
-                goto done1;
-            }
-            result = PyObject_CallFunctionObjArgs(format_method, format_spec, NULL);
-        done1:
-            Py_XDECREF(self_as_str);
-            Py_XDECREF(format_method);
-            if (result == NULL)
-                goto done;
-        }
-    } else {
-        /* Not an instance of a classic class, use the code
-           from py3k */
-        static PyObject* format_cache = NULL;
-
-        /* Find the (unbound!) __format__ method (a borrowed
-           reference) */
-        PyObject* method = _PyObject_LookupSpecial(obj, "__format__", &format_cache);
-        if (method == NULL) {
-            if (!PyErr_Occurred())
-                PyErr_Format(PyExc_TypeError, "Type %.100s doesn't define __format__", Py_TYPE(obj)->tp_name);
-            goto done;
-        }
-        /* And call it. */
-        result = PyObject_CallFunctionObjArgs(method, format_spec, NULL);
-        Py_DECREF(method);
-    }
-
-    if (result == NULL)
-        goto done;
-
-/* Check the result type, and make sure it's str or unicode */
-#ifdef Py_USING_UNICODE
-    if (PyUnicode_Check(result))
-        result_is_unicode = 1;
-    else if (PyString_Check(result))
-        result_is_unicode = 0;
-    else {
-#else
-    if (!PyString_Check(result)) {
-#endif
-        PyErr_Format(PyExc_TypeError, "%.100s.__format__ must return string or "
-                                      "unicode, not %.100s",
-                     Py_TYPE(obj)->tp_name, Py_TYPE(result)->tp_name);
-        Py_DECREF(result);
-        result = NULL;
-        goto done;
-    }
-
-/* Convert to unicode, if needed.  Required if spec is unicode
-   and result is str */
-#ifdef Py_USING_UNICODE
-    if (spec_is_unicode && !result_is_unicode) {
-        PyObject* tmp = PyObject_Unicode(result);
-        /* This logic works whether or not tmp is NULL */
-        Py_DECREF(result);
-        result = tmp;
-    }
-#endif
-
-done:
-    Py_XDECREF(empty);
-    return result;
-}
-
 
 extern "C" PyObject* PyObject_GetAttr(PyObject* o, PyObject* attr) noexcept {
     if (!PyString_Check(attr)) {
@@ -217,9 +72,11 @@ extern "C" PyObject* PyObject_GetAttr(PyObject* o, PyObject* attr) noexcept {
     }
 
     BoxedString* s = static_cast<BoxedString*>(attr);
+    Py_INCREF(s);
     internStringMortalInplace(s);
+    AUTO_DECREF(s);
 
-    Box* r = getattrInternal<ExceptionStyle::CAPI>(o, s, NULL);
+    Box* r = getattrInternal<ExceptionStyle::CAPI>(o, s);
 
     if (!r && !PyErr_Occurred()) {
         PyErr_Format(PyExc_AttributeError, "'%.50s' object has no attribute '%.400s'", o->cls->tp_name,
@@ -232,8 +89,10 @@ extern "C" PyObject* PyObject_GetAttr(PyObject* o, PyObject* attr) noexcept {
 extern "C" PyObject* PyObject_GenericGetAttr(PyObject* o, PyObject* name) noexcept {
     try {
         BoxedString* s = static_cast<BoxedString*>(name);
+        Py_INCREF(s);
         internStringMortalInplace(s);
-        Box* r = getattrInternalGeneric(o, s, NULL, false, false, NULL, NULL);
+        AUTO_DECREF(s);
+        Box* r = getattrInternalGeneric<false, NOT_REWRITABLE>(o, s, NULL, false, false, NULL, NULL);
         if (!r)
             PyErr_Format(PyExc_AttributeError, "'%.50s' object has no attribute '%.400s'", o->cls->tp_name,
                          PyString_AS_STRING(name));
@@ -457,7 +316,7 @@ done:
 
 
 extern "C" PyObject* PyObject_GetItem(PyObject* o, PyObject* key) noexcept {
-    return getitemInternal<ExceptionStyle::CAPI>(o, key, NULL);
+    return getitemInternal<ExceptionStyle::CAPI>(o, key);
 }
 
 extern "C" int PyObject_SetItem(PyObject* o, PyObject* key, PyObject* v) noexcept {
@@ -500,8 +359,10 @@ extern "C" long _Py_HashDouble(double v) noexcept {
              * of mapping keys will turn out weird.
              */
 
+    // pyston change: was if (!Py_IS_FINITE(v)) {
     if (!std::isfinite(v)) {
-        if (Py_IS_INFINITY(v))
+        // pyston change: was if (Py_IS_INFINITY(v)) {
+        if (std::isinf(v))
             return v < 0 ? -271828 : 314159;
         else
             return 0;
@@ -561,29 +422,32 @@ extern "C" long _Py_HashPointer(void* p) noexcept {
 
 extern "C" int PyObject_IsTrue(PyObject* o) noexcept {
     if (o->cls == bool_cls)
-        return o == True;
+        return o == Py_True;
 
     try {
         return o->nonzeroIC();
     } catch (ExcInfo e) {
-        fatalOrError(PyExc_NotImplementedError, "unimplemented");
+        setCAPIException(e);
         return -1;
     }
 }
 
 
 extern "C" int PyObject_Not(PyObject* o) noexcept {
-    fatalOrError(PyExc_NotImplementedError, "unimplemented");
-    return -1;
+    int res;
+    res = PyObject_IsTrue(o);
+    if (res < 0)
+        return res;
+    return res == 0;
 }
 
 extern "C" PyObject* PyObject_Call(PyObject* callable_object, PyObject* args, PyObject* kw) noexcept {
     if (kw)
-        return runtimeCallInternal<ExceptionStyle::CAPI>(callable_object, NULL, ArgPassSpec(0, 0, true, true), args, kw,
-                                                         NULL, NULL, NULL);
+        return runtimeCallInternal<ExceptionStyle::CAPI, NOT_REWRITABLE>(
+            callable_object, NULL, ArgPassSpec(0, 0, true, true), args, kw, NULL, NULL, NULL);
     else
-        return runtimeCallInternal<ExceptionStyle::CAPI>(callable_object, NULL, ArgPassSpec(0, 0, true, false), args,
-                                                         NULL, NULL, NULL, NULL);
+        return runtimeCallInternal<ExceptionStyle::CAPI, NOT_REWRITABLE>(
+            callable_object, NULL, ArgPassSpec(0, 0, true, false), args, NULL, NULL, NULL, NULL);
 }
 
 extern "C" int PyObject_GetBuffer(PyObject* obj, Py_buffer* view, int flags) noexcept {
@@ -670,120 +534,13 @@ extern "C" int Py_FlushLine(void) noexcept {
     return PyFile_WriteString("\n", f);
 }
 
-extern "C" void PyErr_NormalizeException(PyObject** exc, PyObject** val, PyObject** tb) noexcept {
-    PyObject* type = *exc;
-    PyObject* value = *val;
-    PyObject* inclass = NULL;
-    PyObject* initial_tb = NULL;
-    PyThreadState* tstate = NULL;
-
-    if (type == NULL) {
-        /* There was no exception, so nothing to do. */
-        return;
-    }
-
-    /* If PyErr_SetNone() was used, the value will have been actually
-       set to NULL.
-    */
-    if (!value) {
-        value = Py_None;
-        Py_INCREF(value);
-    }
-
-    if (PyExceptionInstance_Check(value))
-        inclass = PyExceptionInstance_Class(value);
-
-    /* Normalize the exception so that if the type is a class, the
-       value will be an instance.
-    */
-    if (PyExceptionClass_Check(type)) {
-        /* if the value was not an instance, or is not an instance
-           whose class is (or is derived from) type, then use the
-           value as an argument to instantiation of the type
-           class.
-        */
-        if (!inclass || !PyObject_IsSubclass(inclass, type)) {
-            PyObject* args, *res;
-
-            if (value == Py_None)
-                args = PyTuple_New(0);
-            else if (PyTuple_Check(value)) {
-                Py_INCREF(value);
-                args = value;
-            } else
-                args = PyTuple_Pack(1, value);
-
-            if (args == NULL)
-                goto finally;
-            res = PyEval_CallObject(type, args);
-            Py_DECREF(args);
-            if (res == NULL)
-                goto finally;
-            Py_DECREF(value);
-            value = res;
-        }
-        /* if the class of the instance doesn't exactly match the
-           class of the type, believe the instance
-        */
-        else if (inclass != type) {
-            Py_DECREF(type);
-            type = inclass;
-            Py_INCREF(type);
-        }
-    }
-    *exc = type;
-    *val = value;
-    return;
-finally:
-    Py_DECREF(type);
-    Py_DECREF(value);
-    /* If the new exception doesn't set a traceback and the old
-       exception had a traceback, use the old traceback for the
-       new exception.  It's better than nothing.
-    */
-    initial_tb = *tb;
-    PyErr_Fetch(exc, val, tb);
-    if (initial_tb != NULL) {
-        if (*tb == NULL)
-            *tb = initial_tb;
-        else
-            Py_DECREF(initial_tb);
-    }
-    /* normalize recursively */
-    tstate = PyThreadState_GET();
-    if (++tstate->recursion_depth > Py_GetRecursionLimit()) {
-        --tstate->recursion_depth;
-        /* throw away the old exception... */
-        Py_DECREF(*exc);
-        Py_DECREF(*val);
-        /* ... and use the recursion error instead */
-        *exc = PyExc_RuntimeError;
-        *val = PyExc_RecursionErrorInst;
-        Py_INCREF(*exc);
-        Py_INCREF(*val);
-        /* just keeping the old traceback */
-        return;
-    }
-    PyErr_NormalizeException(exc, val, tb);
-    --tstate->recursion_depth;
+void setCAPIException(STOLEN(const ExcInfo&) e) noexcept {
+    PyErr_Restore(e.type, e.value, e.traceback);
 }
 
-extern "C" PyGILState_STATE PyGILState_Ensure(void) noexcept {
-    Py_FatalError("unimplemented");
-}
-
-extern "C" void PyGILState_Release(PyGILState_STATE) noexcept {
-    Py_FatalError("unimplemented");
-}
-
-extern "C" PyThreadState* PyGILState_GetThisThreadState(void) noexcept {
-    Py_FatalError("unimplemented");
-}
-
-void setCAPIException(const ExcInfo& e) {
-    cur_thread_state.curexc_type = e.type;
-    cur_thread_state.curexc_value = e.value;
-    cur_thread_state.curexc_traceback = e.traceback;
+void ensureCAPIExceptionSet() {
+    if (!cur_thread_state.curexc_type)
+        PyErr_SetString(SystemError, "error return without exception set");
 }
 
 void throwCAPIException() {
@@ -792,43 +549,42 @@ void throwCAPIException() {
 }
 
 void checkAndThrowCAPIException() {
-    Box* _type = cur_thread_state.curexc_type;
+    // Log these since these are expensive and usually avoidable:
+    static StatCounter num_checkAndThrowCAPIException("num_checkAndThrowCAPIException");
+    num_checkAndThrowCAPIException.log();
+
+    Box* _type, *value, *tb;
+    PyErr_Fetch(&_type, &value, &tb);
+
     if (!_type)
-        assert(!cur_thread_state.curexc_value);
+        assert(!value);
 
     if (_type) {
         BoxedClass* type = static_cast<BoxedClass*>(_type);
-        assert(isSubclass(_type->cls, type_cls) && isSubclass(static_cast<BoxedClass*>(type), BaseException)
+        assert(PyType_Check(_type) && isSubclass(static_cast<BoxedClass*>(type), BaseException)
                && "Only support throwing subclass of BaseException for now");
 
-        Box* value = cur_thread_state.curexc_value;
         if (!value)
-            value = None;
-
-        Box* tb = cur_thread_state.curexc_traceback;
-        if (!tb)
-            tb = None;
-
-        // Make sure to call PyErr_Clear() *before* normalizing the exception, since otherwise
-        // the normalization can think that it had raised an exception, resulting to a call
-        // to checkAndThrowCAPIException, and boom.
-        PyErr_Clear();
+            value = incref(Py_None);
 
         // This is similar to PyErr_NormalizeException:
         if (!isSubclass(value->cls, type)) {
             if (value->cls == tuple_cls) {
-                value = runtimeCall(type, ArgPassSpec(0, 0, true, false), value, NULL, NULL, NULL, NULL);
-            } else if (value == None) {
+                value = runtimeCall(type, ArgPassSpec(0, 0, true, false), autoDecref(value), NULL, NULL, NULL, NULL);
+            } else if (value == Py_None) {
                 value = runtimeCall(type, ArgPassSpec(0), NULL, NULL, NULL, NULL, NULL);
+                Py_DECREF(Py_None);
             } else {
-                value = runtimeCall(type, ArgPassSpec(1), value, NULL, NULL, NULL, NULL);
+                value = runtimeCall(type, ArgPassSpec(1), autoDecref(value), NULL, NULL, NULL, NULL);
             }
         }
 
         RELEASE_ASSERT(value->cls == type, "unsupported");
 
-        if (tb != None)
+        if (tb)
             throw ExcInfo(value->cls, value, tb);
+        Py_DECREF(type);
+        Py_XDECREF(tb);
         raiseExc(value);
     }
 }
@@ -840,72 +596,22 @@ extern "C" void Py_Exit(int sts) noexcept {
     exit(sts);
 }
 
-extern "C" void PyErr_Restore(PyObject* type, PyObject* value, PyObject* traceback) noexcept {
-    cur_thread_state.curexc_type = type;
-    cur_thread_state.curexc_value = value;
-    cur_thread_state.curexc_traceback = traceback;
-}
-
-extern "C" void PyErr_Clear() noexcept {
-    PyErr_Restore(NULL, NULL, NULL);
-}
-
 extern "C" void PyErr_GetExcInfo(PyObject** ptype, PyObject** pvalue, PyObject** ptraceback) noexcept {
     ExcInfo* exc = getFrameExcInfo();
-    *ptype = exc->type;
-    *pvalue = exc->value;
-    *ptraceback = exc->traceback;
+    *ptype = xincref(exc->type);
+    *pvalue = xincref(exc->value);
+    *ptraceback = xincref(exc->traceback);
 }
 
 extern "C" void PyErr_SetExcInfo(PyObject* type, PyObject* value, PyObject* traceback) noexcept {
     ExcInfo* exc = getFrameExcInfo();
-    exc->type = type;
-    exc->value = value;
+    AUTO_XDECREF(exc->type);
+    AUTO_XDECREF(exc->value);
+    AUTO_XDECREF(exc->traceback);
+
+    exc->type = type ? type : incref(Py_None);
+    exc->value = value ? value : incref(Py_None);
     exc->traceback = traceback;
-}
-
-extern "C" void PyErr_SetString(PyObject* exception, const char* string) noexcept {
-    PyErr_SetObject(exception, boxString(string));
-}
-
-extern "C" void PyErr_SetObject(PyObject* exception, PyObject* value) noexcept {
-    PyErr_Restore(exception, value, NULL);
-}
-
-extern "C" PyObject* PyErr_Format(PyObject* exception, const char* format, ...) noexcept {
-    va_list vargs;
-    PyObject* string;
-
-#ifdef HAVE_STDARG_PROTOTYPES
-    va_start(vargs, format);
-#else
-    va_start(vargs);
-#endif
-
-    string = PyString_FromFormatV(format, vargs);
-    PyErr_SetObject(exception, string);
-    Py_XDECREF(string);
-    va_end(vargs);
-    return NULL;
-}
-
-extern "C" int PyErr_BadArgument() noexcept {
-    // TODO this is untested
-    PyErr_SetString(PyExc_TypeError, "bad argument type for built-in operation");
-    return 0;
-}
-
-extern "C" PyObject* PyErr_NoMemory() noexcept {
-    fatalOrError(PyExc_NotImplementedError, "unimplemented");
-    return nullptr;
-}
-
-extern "C" int PyExceptionClass_Check(PyObject* o) noexcept {
-    return PyClass_Check(o) || (PyType_Check(o) && isSubclass(static_cast<BoxedClass*>(o), BaseException));
-}
-
-extern "C" int PyExceptionInstance_Check(PyObject* o) noexcept {
-    return PyInstance_Check(o) || isSubclass(o->cls, BaseException);
 }
 
 extern "C" const char* PyExceptionClass_Name(PyObject* o) noexcept {
@@ -917,14 +623,15 @@ extern "C" PyObject* PyExceptionInstance_Class(PyObject* o) noexcept {
     return PyInstance_Check(o) ? (Box*)static_cast<BoxedInstance*>(o)->inst_cls : o->cls;
 }
 
-extern "C" int PyTraceBack_Print(PyObject* v, PyObject* f) noexcept {
-    RELEASE_ASSERT(f->cls == file_cls && static_cast<BoxedFile*>(f)->f_fp == stderr,
-                   "sorry will only print tracebacks to stderr right now");
-    printTraceback(v);
-    return 0;
-}
-
+// With optimizations turned off, we can handle much fewer Python stack frames
+// in the same amount of C-stack space.
+// Use NDEBUG as a proxy for whether optimizations are turned on.
+#ifndef NDEBUG
+#define Py_DEFAULT_RECURSION_LIMIT 300
+#else
 #define Py_DEFAULT_RECURSION_LIMIT 1000
+#endif
+
 static int recursion_limit = Py_DEFAULT_RECURSION_LIMIT;
 extern "C" {
 int _Py_CheckRecursionLimit = Py_DEFAULT_RECURSION_LIMIT;
@@ -963,107 +670,16 @@ extern "C" void Py_SetRecursionLimit(int new_limit) noexcept {
     _Py_CheckRecursionLimit = recursion_limit;
 }
 
-extern "C" int PyErr_GivenExceptionMatches(PyObject* err, PyObject* exc) noexcept {
-    if (err == NULL || exc == NULL) {
-        /* maybe caused by "import exceptions" that failed early on */
-        return 0;
-    }
-    if (PyTuple_Check(exc)) {
-        Py_ssize_t i, n;
-        n = PyTuple_Size(exc);
-        for (i = 0; i < n; i++) {
-            /* Test recursively */
-            if (PyErr_GivenExceptionMatches(err, PyTuple_GET_ITEM(exc, i))) {
-                return 1;
-            }
-        }
-        return 0;
-    }
-    /* err might be an instance, so check its class. */
-    if (PyExceptionInstance_Check(err))
-        err = PyExceptionInstance_Class(err);
-
-    if (PyExceptionClass_Check(err) && PyExceptionClass_Check(exc)) {
-        int res = 0, reclimit;
-        PyObject* exception, *value, *tb;
-        PyErr_Fetch(&exception, &value, &tb);
-        /* Temporarily bump the recursion limit, so that in the most
-           common case PyObject_IsSubclass will not raise a recursion
-           error we have to ignore anyway.  Don't do it when the limit
-           is already insanely high, to avoid overflow */
-        reclimit = Py_GetRecursionLimit();
-        if (reclimit < (1 << 30))
-            Py_SetRecursionLimit(reclimit + 5);
-        res = PyObject_IsSubclass(err, exc);
-        Py_SetRecursionLimit(reclimit);
-        /* This function must not fail, so print the error here */
-        if (res == -1) {
-            PyErr_WriteUnraisable(err);
-            res = 0;
-        }
-        PyErr_Restore(exception, value, tb);
-        return res;
-    }
-
-    return err == exc;
+extern "C" void* PyMem_Malloc(size_t nbytes) noexcept {
+    return PyMem_MALLOC(nbytes);
 }
 
-extern "C" int PyErr_ExceptionMatches(PyObject* exc) noexcept {
-    return PyErr_GivenExceptionMatches(PyErr_Occurred(), exc);
+extern "C" void* PyMem_Realloc(void* p, size_t nbytes) noexcept {
+    return PyMem_REALLOC(p, nbytes);
 }
 
-extern "C" PyObject* PyErr_Occurred() noexcept {
-    return cur_thread_state.curexc_type;
-}
-
-extern "C" int PyErr_WarnEx(PyObject* category, const char* text, Py_ssize_t stacklevel) noexcept {
-    // These warnings are silenced by default:
-    // We should copy the real CPython code in here
-    if (category == PyExc_DeprecationWarning)
-        return 0;
-
-    fatalOrError(PyExc_NotImplementedError, "unimplemented");
-    return -1;
-}
-
-extern "C" PyObject* PyImport_Import(PyObject* module_name) noexcept {
-    RELEASE_ASSERT(module_name, "");
-    RELEASE_ASSERT(module_name->cls == str_cls, "");
-
-    try {
-        std::string _module_name = static_cast<BoxedString*>(module_name)->s();
-        return importModuleLevel(_module_name, None, None, -1);
-    } catch (ExcInfo e) {
-        fatalOrError(PyExc_NotImplementedError, "unimplemented");
-        return nullptr;
-    }
-}
-
-
-extern "C" void* PyObject_Malloc(size_t sz) noexcept {
-    return gc_compat_malloc(sz);
-}
-
-extern "C" void* PyObject_Realloc(void* ptr, size_t sz) noexcept {
-    return gc_compat_realloc(ptr, sz);
-}
-
-extern "C" void PyObject_Free(void* ptr) noexcept {
-    // In Pyston, everything is GC'ed and we shouldn't explicitely free memory.
-    // Only the GC knows for sure that an object is no longer referenced.
-}
-
-extern "C" void* PyMem_Malloc(size_t sz) noexcept {
-    return gc_compat_malloc(sz);
-}
-
-extern "C" void* PyMem_Realloc(void* ptr, size_t sz) noexcept {
-    return gc_compat_realloc(ptr, sz);
-}
-
-extern "C" void PyMem_Free(void* ptr) noexcept {
-    // In Pyston, everything is GC'ed and we shouldn't explicitely free memory.
-    // Only the GC knows for sure that an object is no longer referenced.
+extern "C" void PyMem_Free(void* p) noexcept {
+    PyMem_FREE(p);
 }
 
 extern "C" int PyOS_snprintf(char* str, size_t size, const char* format, ...) noexcept {
@@ -1171,6 +787,354 @@ static int dev_urandom_python(char* buffer, Py_ssize_t size) noexcept {
 }
 }
 
+extern "C" int Py_FdIsInteractive(FILE* fp, const char* filename) noexcept {
+    if (isatty((int)fileno(fp)))
+        return 1;
+    if (!Py_InteractiveFlag)
+        return 0;
+    return (filename == NULL) || (strcmp(filename, "<stdin>") == 0) || (strcmp(filename, "???") == 0);
+}
+
+extern "C" int PyRun_InteractiveOneFlags(FILE* fp, const char* filename, PyCompilerFlags* flags) noexcept {
+    PyObject* m, *d, *v, *w;
+    mod_ty mod;
+    PyArena* arena;
+
+    char _buf[1] = "";
+    char* ps1 = _buf, * ps2 = _buf;
+    int errcode = 0;
+
+    v = PySys_GetObject("ps1");
+    if (v != NULL) {
+        v = PyObject_Str(v);
+        if (v == NULL)
+            PyErr_Clear();
+        else if (PyString_Check(v))
+            ps1 = PyString_AsString(v);
+    }
+    w = PySys_GetObject("ps2");
+    if (w != NULL) {
+        w = PyObject_Str(w);
+        if (w == NULL)
+            PyErr_Clear();
+        else if (PyString_Check(w))
+            ps2 = PyString_AsString(w);
+    }
+    arena = PyArena_New();
+    if (arena == NULL) {
+        Py_XDECREF(v);
+        Py_XDECREF(w);
+        return -1;
+    }
+    mod = PyParser_ASTFromFile(fp, filename, Py_single_input, ps1, ps2, flags, &errcode, arena);
+    Py_XDECREF(v);
+    Py_XDECREF(w);
+    if (mod == NULL) {
+        PyArena_Free(arena);
+        if (errcode == E_EOF) {
+            PyErr_Clear();
+            return E_EOF;
+        }
+        PyErr_Print();
+        return -1;
+    }
+    m = PyImport_AddModule("__main__");
+    if (m == NULL) {
+        PyArena_Free(arena);
+        return -1;
+    }
+
+    // Pyston change:
+    // d = PyModule_GetDict(m);
+    // v = run_mod(mod, filename, d, d, flags, arena);
+    assert(PyModule_Check(m));
+    bool failed = false;
+    try {
+        assert(mod->kind == Interactive_kind);
+        auto res = cpythonToPystonAST(mod, filename);
+        compileAndRunModule((AST_Module*)res.first, static_cast<BoxedModule*>(m));
+    } catch (ExcInfo e) {
+        setCAPIException(e);
+        failed = true;
+    }
+
+    PyArena_Free(arena);
+    if (failed) {
+        PyErr_Print();
+        return -1;
+    }
+    // Pyston change: we dont't have v
+    // Py_DECREF(v);
+
+    if (Py_FlushLine())
+        PyErr_Clear();
+    return 0;
+}
+
+/* Set the error appropriate to the given input error code (see errcode.h) */
+
+static void err_input(perrdetail* err) noexcept {
+    PyObject* v, *w, *errtype;
+    PyObject* u = NULL;
+    const char* msg = NULL;
+    errtype = PyExc_SyntaxError;
+    switch (err->error) {
+        case E_ERROR:
+            return;
+        case E_SYNTAX:
+            errtype = PyExc_IndentationError;
+            if (err->expected == INDENT)
+                msg = "expected an indented block";
+            else if (err->token == INDENT)
+                msg = "unexpected indent";
+            else if (err->token == DEDENT)
+                msg = "unexpected unindent";
+            else {
+                errtype = PyExc_SyntaxError;
+                msg = "invalid syntax";
+            }
+            break;
+        case E_TOKEN:
+            msg = "invalid token";
+            break;
+        case E_EOFS:
+            msg = "EOF while scanning triple-quoted string literal";
+            break;
+        case E_EOLS:
+            msg = "EOL while scanning string literal";
+            break;
+        case E_INTR:
+            if (!PyErr_Occurred())
+                PyErr_SetNone(PyExc_KeyboardInterrupt);
+            goto cleanup;
+        case E_NOMEM:
+            PyErr_NoMemory();
+            goto cleanup;
+        case E_EOF:
+            msg = "unexpected EOF while parsing";
+            break;
+        case E_TABSPACE:
+            errtype = PyExc_TabError;
+            msg = "inconsistent use of tabs and spaces in indentation";
+            break;
+        case E_OVERFLOW:
+            msg = "expression too long";
+            break;
+        case E_DEDENT:
+            errtype = PyExc_IndentationError;
+            msg = "unindent does not match any outer indentation level";
+            break;
+        case E_TOODEEP:
+            errtype = PyExc_IndentationError;
+            msg = "too many levels of indentation";
+            break;
+        case E_DECODE: {
+            PyObject* type, *value, *tb;
+            PyErr_Fetch(&type, &value, &tb);
+            if (value != NULL) {
+                u = PyObject_Str(value);
+                if (u != NULL) {
+                    msg = PyString_AsString(u);
+                }
+            }
+            if (msg == NULL)
+                msg = "unknown decode error";
+            Py_XDECREF(type);
+            Py_XDECREF(value);
+            Py_XDECREF(tb);
+            break;
+        }
+        case E_LINECONT:
+            msg = "unexpected character after line continuation character";
+            break;
+        default:
+            fprintf(stderr, "error=%d\n", err->error);
+            msg = "unknown parsing error";
+            break;
+    }
+    v = Py_BuildValue("(ziiz)", err->filename, err->lineno, err->offset, err->text);
+    w = NULL;
+    if (v != NULL)
+        w = Py_BuildValue("(sO)", msg, v);
+    Py_XDECREF(u);
+    Py_XDECREF(v);
+    PyErr_SetObject(errtype, w);
+    Py_XDECREF(w);
+cleanup:
+    if (err->text != NULL) {
+        PyObject_FREE(err->text);
+        err->text = NULL;
+    }
+}
+#if 0
+/* compute parser flags based on compiler flags */
+#define PARSER_FLAGS(flags)                                                                                            \
+    ((flags) ? ((((flags)->cf_flags & PyCF_DONT_IMPLY_DEDENT) ? PyPARSE_DONT_IMPLY_DEDENT : 0)) : 0)
+#endif
+#if 1
+/* Keep an example of flags with future keyword support. */
+#define PARSER_FLAGS(flags)                                                                                            \
+    ((flags) ? ((((flags)->cf_flags & PyCF_DONT_IMPLY_DEDENT) ? PyPARSE_DONT_IMPLY_DEDENT : 0)                         \
+                | (((flags)->cf_flags & CO_FUTURE_PRINT_FUNCTION) ? PyPARSE_PRINT_IS_FUNCTION : 0)                     \
+                | (((flags)->cf_flags & CO_FUTURE_UNICODE_LITERALS) ? PyPARSE_UNICODE_LITERALS : 0))                   \
+             : 0)
+#endif
+
+extern "C" void PyParser_SetError(perrdetail* err) noexcept {
+    err_input(err);
+}
+
+
+extern "C" grammar _PyParser_Grammar;
+
+/* Preferred access to parser is through AST. */
+extern "C" mod_ty PyParser_ASTFromString(const char* s, const char* filename, int start, PyCompilerFlags* flags,
+                                         PyArena* arena) noexcept {
+    mod_ty mod;
+    PyCompilerFlags localflags;
+    perrdetail err;
+    int iflags = PARSER_FLAGS(flags);
+
+    node* n = PyParser_ParseStringFlagsFilenameEx(s, filename, &_PyParser_Grammar, start, &err, &iflags);
+    if (flags == NULL) {
+        localflags.cf_flags = 0;
+        flags = &localflags;
+    }
+    if (n) {
+        flags->cf_flags |= iflags & PyCF_MASK;
+        mod = PyAST_FromNode(n, flags, filename, arena);
+        PyNode_Free(n);
+        return mod;
+    } else {
+        err_input(&err);
+        return NULL;
+    }
+}
+
+extern "C" mod_ty PyParser_ASTFromFile(FILE* fp, const char* filename, int start, char* ps1, char* ps2,
+                                       PyCompilerFlags* flags, int* errcode, PyArena* arena) noexcept {
+    mod_ty mod;
+    PyCompilerFlags localflags;
+    perrdetail err;
+    int iflags = PARSER_FLAGS(flags);
+
+    node* n = PyParser_ParseFileFlagsEx(fp, filename, &_PyParser_Grammar, start, ps1, ps2, &err, &iflags);
+    if (flags == NULL) {
+        localflags.cf_flags = 0;
+        flags = &localflags;
+    }
+    if (n) {
+        flags->cf_flags |= iflags & PyCF_MASK;
+        mod = PyAST_FromNode(n, flags, filename, arena);
+        PyNode_Free(n);
+        return mod;
+    } else {
+        err_input(&err);
+        if (errcode)
+            *errcode = err.error;
+        return NULL;
+    }
+}
+
+extern "C" PyObject* Py_CompileStringFlags(const char* str, const char* filename, int start,
+                                           PyCompilerFlags* flags) noexcept {
+    PyCodeObject* co;
+    mod_ty mod;
+    PyArena* arena = PyArena_New();
+    if (arena == NULL)
+        return NULL;
+
+    mod = PyParser_ASTFromString(str, filename, start, flags, arena);
+    if (mod == NULL) {
+        PyArena_Free(arena);
+        return NULL;
+    }
+    if (flags && (flags->cf_flags & PyCF_ONLY_AST)) {
+        PyObject* result = PyAST_mod2obj(mod);
+        PyArena_Free(arena);
+        return result;
+    }
+    co = PyAST_Compile(mod, filename, flags, arena);
+    PyArena_Free(arena);
+    return (PyObject*)co;
+}
+
+static PyObject* run_mod(mod_ty mod, const char* filename, PyObject* globals, PyObject* locals, PyCompilerFlags* flags,
+                         PyArena* arena) noexcept {
+    PyCodeObject* co;
+    PyObject* v;
+    co = PyAST_Compile(mod, filename, flags, arena);
+    if (co == NULL)
+        return NULL;
+    v = PyEval_EvalCode(co, globals, locals);
+    Py_DECREF(co);
+    return v;
+}
+
+extern "C" PyObject* PyRun_FileExFlags(FILE* fp, const char* filename, int start, PyObject* globals, PyObject* locals,
+                                       int closeit, PyCompilerFlags* flags) noexcept {
+    PyObject* ret;
+    mod_ty mod;
+    PyArena* arena = PyArena_New();
+    if (arena == NULL)
+        return NULL;
+
+    mod = PyParser_ASTFromFile(fp, filename, start, 0, 0, flags, NULL, arena);
+    if (closeit)
+        fclose(fp);
+    if (mod == NULL) {
+        PyArena_Free(arena);
+        return NULL;
+    }
+    ret = run_mod(mod, filename, globals, locals, flags, arena);
+    PyArena_Free(arena);
+    return ret;
+}
+
+extern "C" PyObject* PyRun_StringFlags(const char* str, int start, PyObject* globals, PyObject* locals,
+                                       PyCompilerFlags* flags) noexcept {
+    PyObject* ret = NULL;
+    mod_ty mod;
+    PyArena* arena = PyArena_New();
+    if (arena == NULL)
+        return NULL;
+
+    mod = PyParser_ASTFromString(str, "<string>", start, flags, arena);
+    if (mod != NULL)
+        ret = run_mod(mod, "<string>", globals, locals, flags, arena);
+    PyArena_Free(arena);
+    return ret;
+}
+
+extern "C" int PyRun_InteractiveLoopFlags(FILE* fp, const char* filename, PyCompilerFlags* flags) noexcept {
+    PyObject* v;
+    int ret;
+    PyCompilerFlags local_flags;
+
+    if (flags == NULL) {
+        flags = &local_flags;
+        local_flags.cf_flags = 0;
+    }
+    v = PySys_GetObject("ps1");
+    if (v == NULL) {
+        PySys_SetObject("ps1", v = PyString_FromString(">> "));
+        Py_XDECREF(v);
+    }
+    v = PySys_GetObject("ps2");
+    if (v == NULL) {
+        PySys_SetObject("ps2", v = PyString_FromString("... "));
+        Py_XDECREF(v);
+    }
+    for (;;) {
+        ret = PyRun_InteractiveOneFlags(fp, filename, flags);
+        // PRINT_TOTAL_REFS();
+        if (ret == E_EOF)
+            return 0;
+        if (ret == E_NOMEM)
+            return -1;
+    }
+}
+
 static const char* progname = "pyston";
 extern "C" void Py_SetProgramName(char* pn) noexcept {
     if (pn && *pn)
@@ -1193,7 +1157,7 @@ extern "C" char* Py_GetPythonHome(void) noexcept {
     return home;
 }
 
-extern "C" PyObject* PyThreadState_GetDict(void) noexcept {
+extern "C" BORROWED(PyObject*) PyThreadState_GetDict(void) noexcept {
     Box* dict = cur_thread_state.dict;
     if (!dict) {
         dict = cur_thread_state.dict = new BoxedDict();
@@ -1253,10 +1217,6 @@ extern "C" PyOS_sighandler_t PyOS_getsig(int sig) noexcept {
 }
 
 extern "C" PyOS_sighandler_t PyOS_setsig(int sig, PyOS_sighandler_t handler) noexcept {
-    if (sig == SIGUSR2) {
-        Py_FatalError("SIGUSR2 is reserved for Pyston internal use");
-    }
-
 #ifdef HAVE_SIGACTION
     /* Some code in Modules/signalmodule.c depends on sigaction() being
      * used here if HAVE_SIGACTION is defined.  Fix that if this code
@@ -1277,22 +1237,6 @@ extern "C" PyOS_sighandler_t PyOS_setsig(int sig, PyOS_sighandler_t handler) noe
 #endif
     return oldhandler;
 #endif
-}
-
-extern "C" int Py_AddPendingCall(int (*func)(void*), void* arg) noexcept {
-    fatalOrError(PyExc_NotImplementedError, "unimplemented");
-    return -1;
-}
-
-extern "C" PyObject* _PyImport_FixupExtension(char* name, char* filename) noexcept {
-    // Don't have to do anything here, since we will error in _PyImport_FindExtension
-    // TODO is this ok?
-    return NULL;
-}
-
-extern "C" PyObject* _PyImport_FindExtension(char* name, char* filename) noexcept {
-    fatalOrError(PyExc_NotImplementedError, "unimplemented");
-    return nullptr;
 }
 
 static PyObject* listmethodchain(PyMethodChain* chain) noexcept {
@@ -1360,8 +1304,6 @@ extern "C" PyObject* Py_FindMethod(PyMethodDef* methods, PyObject* self, const c
 }
 
 extern "C" PyObject* PyCFunction_NewEx(PyMethodDef* ml, PyObject* self, PyObject* module) noexcept {
-    assert((ml->ml_flags & (~(METH_VARARGS | METH_KEYWORDS | METH_NOARGS | METH_O))) == 0);
-
     return new BoxedCApiFunction(ml, self, module);
 }
 
@@ -1373,7 +1315,7 @@ extern "C" PyCFunction PyCFunction_GetFunction(PyObject* op) noexcept {
     return static_cast<BoxedCApiFunction*>(op)->getFunction();
 }
 
-extern "C" PyObject* PyCFunction_GetSelf(PyObject* op) noexcept {
+extern "C" PyObject* PyCFunction_GetSelf(BORROWED(PyObject*) op) noexcept {
     if (!PyCFunction_Check(op)) {
         PyErr_BadInternalCall();
         return NULL;
@@ -1381,27 +1323,18 @@ extern "C" PyObject* PyCFunction_GetSelf(PyObject* op) noexcept {
     return static_cast<BoxedCApiFunction*>(op)->passthrough;
 }
 
-extern "C" int _PyEval_SliceIndex(PyObject* v, Py_ssize_t* pi) noexcept {
-    if (v != NULL) {
-        Py_ssize_t x;
-        if (PyInt_Check(v)) {
-            /* XXX(nnorwitz): I think PyInt_AS_LONG is correct,
-               however, it looks like it should be AsSsize_t.
-               There should be a comment here explaining why.
-            */
-            x = PyInt_AS_LONG(v);
-        } else if (PyIndex_Check(v)) {
-            x = PyNumber_AsSsize_t(v, NULL);
-            if (x == -1 && PyErr_Occurred())
-                return 0;
-        } else {
-            PyErr_SetString(PyExc_TypeError, "slice indices must be integers or "
-                                             "None or have an __index__ method");
-            return 0;
-        }
-        *pi = x;
+extern "C" int PyCFunction_GetFlags(PyObject* op) noexcept {
+    if (!PyCFunction_Check(op)) {
+        PyErr_BadInternalCall();
+        return -1;
     }
-    return 1;
+    return static_cast<BoxedCApiFunction*>(op)->method_def->ml_flags;
+}
+
+extern "C" PyObject* PyCFunction_Call(PyObject* func, PyObject* arg, PyObject* kw) noexcept {
+    assert(arg->cls == tuple_cls);
+    assert(!kw || kw->cls == dict_cls);
+    return BoxedCApiFunction::tppCall<CAPI>(func, NULL, ArgPassSpec(0, 0, true, true), arg, kw, NULL, NULL, NULL);
 }
 
 extern "C" int PyEval_GetRestricted(void) noexcept {
@@ -1412,24 +1345,15 @@ extern "C" void PyEval_InitThreads(void) noexcept {
     // nothing to do here
 }
 
-extern "C" void PyEval_AcquireThread(PyThreadState* tstate) noexcept {
-    Py_FatalError("Unimplemented");
-}
-
-extern "C" void PyEval_ReleaseThread(PyThreadState* tstate) noexcept {
-    Py_FatalError("Unimplemented");
-}
-
-extern "C" PyThreadState* PyThreadState_Get(void) noexcept {
-    Py_FatalError("Unimplemented");
-}
-
-extern "C" PyThreadState* PyEval_SaveThread(void) noexcept {
-    Py_FatalError("Unimplemented");
-}
-
-extern "C" void PyEval_RestoreThread(PyThreadState* tstate) noexcept {
-    Py_FatalError("Unimplemented");
+extern "C" BORROWED(struct _frame*) PyEval_GetFrame(void) noexcept {
+    Box* frame = NULL;
+    try {
+        frame = getFrame(0);
+    } catch (ExcInfo e) {
+        e.clear();
+        RELEASE_ASSERT(0, "untested");
+    }
+    return (struct _frame*)frame;
 }
 
 extern "C" char* PyModule_GetName(PyObject* m) noexcept {
@@ -1439,7 +1363,7 @@ extern "C" char* PyModule_GetName(PyObject* m) noexcept {
         PyErr_BadArgument();
         return NULL;
     }
-    static BoxedString* name_str = internStringImmortal("__name__");
+    static BoxedString* name_str = getStaticString("__name__");
     if ((nameobj = m->getattr(name_str)) == NULL || !PyString_Check(nameobj)) {
         PyErr_SetString(PyExc_SystemError, "nameless module");
         return NULL;
@@ -1454,7 +1378,7 @@ extern "C" char* PyModule_GetFilename(PyObject* m) noexcept {
         PyErr_BadArgument();
         return NULL;
     }
-    static BoxedString* file_str = internStringImmortal("__file__");
+    static BoxedString* file_str = getStaticString("__file__");
     if ((fileobj = m->getattr(file_str)) == NULL || !PyString_Check(fileobj)) {
         PyErr_SetString(PyExc_SystemError, "module filename missing");
         return NULL;
@@ -1471,24 +1395,30 @@ Box* BoxedCApiFunction::__call__(BoxedCApiFunction* self, BoxedTuple* varargs, B
     // Kind of silly to have asked callFunc to rearrange the arguments for us, just to pass things
     // off to tppCall, but this case should be very uncommon (people explicitly asking for __call__)
 
-    return BoxedCApiFunction::tppCall(self, NULL, ArgPassSpec(0, 0, true, true), varargs, kwargs, NULL, NULL, NULL);
+    return BoxedCApiFunction::tppCall<CXX>(self, NULL, ArgPassSpec(0, 0, true, true), varargs, kwargs, NULL, NULL,
+                                           NULL);
 }
 
+template <ExceptionStyle S>
 Box* BoxedCApiFunction::tppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1, Box* arg2,
-                                Box* arg3, Box** args, const std::vector<BoxedString*>* keyword_names) {
+                                Box* arg3, Box** args,
+                                const std::vector<BoxedString*>* keyword_names) noexcept(S == CAPI) {
     STAT_TIMER(t0, "us_timer_boxedcapifunction__call__", 10);
 
-    assert(_self->cls == capifunc_cls);
     BoxedCApiFunction* self = static_cast<BoxedCApiFunction*>(_self);
 
     if (rewrite_args) {
         rewrite_args->obj->addGuard((intptr_t)self);
+        rewrite_args->rewriter->addGCReference(self);
     }
 
     int flags = self->method_def->ml_flags;
     auto func = self->method_def->ml_meth;
 
+    flags &= ~(METH_CLASS | METH_STATIC | METH_COEXIST);
+
     ParamReceiveSpec paramspec(0, 0, true, false);
+    Box** defaults = NULL;
     if (flags == METH_VARARGS) {
         paramspec = ParamReceiveSpec(0, 0, true, false);
     } else if (flags == (METH_VARARGS | METH_KEYWORDS)) {
@@ -1499,69 +1429,138 @@ Box* BoxedCApiFunction::tppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPa
         paramspec = ParamReceiveSpec(1, 0, false, false);
     } else if (flags == METH_OLDARGS) {
         paramspec = ParamReceiveSpec(1, 0, false, false);
+    } else if ((flags & ~(METH_O3 | METH_D3)) == 0) {
+        int num_args = 0;
+        if (flags & METH_O)
+            num_args++;
+        if (flags & METH_O2)
+            num_args += 2;
+
+        int num_defaults = 0;
+        if (flags & METH_D1)
+            num_defaults++;
+        if (flags & METH_D2)
+            num_defaults += 2;
+
+        paramspec = ParamReceiveSpec(num_args, num_defaults, false, false);
+        if (num_defaults) {
+            static Box* _defaults[] = { NULL, NULL, NULL };
+            assert(num_defaults <= 3);
+            defaults = _defaults;
+        }
+
+        assert(paramspec.totalReceived() <= 3); // would need to allocate oargs
     } else {
         RELEASE_ASSERT(0, "0x%x", flags);
     }
 
-    Box* oarg1 = NULL;
-    Box* oarg2 = NULL;
-    Box* oarg3 = NULL;
     Box** oargs = NULL;
 
-    bool rewrite_success = false;
-    rearrangeArguments(paramspec, NULL, self->method_def->ml_name, NULL, rewrite_args, rewrite_success, argspec, arg1,
-                       arg2, arg3, args, keyword_names, oarg1, oarg2, oarg3, oargs);
+    if (func == (void*)tp_new_wrapper) {
+        assert(PyType_Check(self->passthrough));
+        BoxedClass* passthrough_cls = static_cast<BoxedClass*>(self->passthrough);
+        if (passthrough_cls->tp_new == BaseException->tp_new && argspec.num_args >= 1) {
+            // Optimization: BaseException->tp_new doesn't look at its arguments.
+            // Don't bother allocating any
+            assert(paramspec == ParamReceiveSpec(0, 0, true, true));
 
-    if (!rewrite_success)
-        rewrite_args = NULL;
-
-    RewriterVar* r_passthrough = NULL;
-    if (rewrite_args)
-        r_passthrough = rewrite_args->rewriter->loadConst((intptr_t)self->passthrough, Location::forArg(0));
-
-    Box* rtn;
-    if (flags == METH_VARARGS) {
-        rtn = (Box*)func(self->passthrough, oarg1);
-        if (rewrite_args)
-            rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)func, r_passthrough, rewrite_args->arg1);
-    } else if (flags == (METH_VARARGS | METH_KEYWORDS)) {
-        rtn = (Box*)((PyCFunctionWithKeywords)func)(self->passthrough, oarg1, oarg2);
-        if (rewrite_args)
-            rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)func, r_passthrough, rewrite_args->arg1,
-                                                                 rewrite_args->arg2);
-    } else if (flags == METH_NOARGS) {
-        rtn = (Box*)func(self->passthrough, NULL);
-        if (rewrite_args)
-            rewrite_args->out_rtn = rewrite_args->rewriter->call(
-                true, (void*)func, r_passthrough, rewrite_args->rewriter->loadConst(0, Location::forArg(1)));
-    } else if (flags == METH_O) {
-        rtn = (Box*)func(self->passthrough, oarg1);
-        if (rewrite_args)
-            rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)func, r_passthrough, rewrite_args->arg1);
-    } else if (flags == METH_OLDARGS) {
-        /* the really old style */
-
-        rewrite_args = NULL;
-
-        int size = PyTuple_GET_SIZE(oarg1);
-        Box* arg = oarg1;
-        if (size == 1)
-            arg = PyTuple_GET_ITEM(oarg1, 0);
-        else if (size == 0)
-            arg = NULL;
-        rtn = func(self->passthrough, arg);
-    } else {
-        RELEASE_ASSERT(0, "0x%x", flags);
+            assert(PyType_Check(arg1));
+            Box* rtn = BaseException->tp_new(static_cast<BoxedClass*>(arg1), NULL, NULL);
+            if (rewrite_args) {
+                rewrite_args->out_rtn
+                    = rewrite_args->rewriter->call(true, (void*)BaseException->tp_new, rewrite_args->arg1,
+                                                   rewrite_args->rewriter->loadConst(0, Location::forArg(1)),
+                                                   rewrite_args->rewriter->loadConst(0, Location::forArg(2)));
+                rewrite_args->out_rtn->setType(RefType::OWNED);
+                rewrite_args->out_success = true;
+            }
+            assert(rtn); // This shouldn't throw, otherwise we would need to check the return value
+            return rtn;
+        }
+        // TODO rewrite these cases specially; tp_new_wrapper just slices the args array,
+        // so we could just rearrangeArguments to the form that it wants and then call tp_new directly.
     }
 
-    if (rewrite_args) {
-        rewrite_args->rewriter->call(false, (void*)checkAndThrowCAPIException);
-        rewrite_args->out_success = true;
-    }
+    auto continuation = [=](CallRewriteArgs* rewrite_args, Box* arg1, Box* arg2, Box* arg3, Box** args) {
+        RewriterVar* r_passthrough = NULL;
+        if (rewrite_args)
+            r_passthrough = rewrite_args->rewriter->loadConst((intptr_t)self->passthrough, Location::forArg(0));
 
-    checkAndThrowCAPIException();
-    assert(rtn && "should have set + thrown an exception!");
-    return rtn;
+        Box* rtn;
+        if (flags == METH_VARARGS) {
+            rtn = (Box*)func(self->passthrough, arg1);
+            if (rewrite_args)
+                rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)func, r_passthrough,
+                                                                     rewrite_args->arg1)->setType(RefType::OWNED);
+        } else if (flags == (METH_VARARGS | METH_KEYWORDS)) {
+            rtn = (Box*)((PyCFunctionWithKeywords)func)(self->passthrough, arg1, arg2);
+            if (rewrite_args)
+                rewrite_args->out_rtn
+                    = rewrite_args->rewriter->call(true, (void*)func, r_passthrough, rewrite_args->arg1,
+                                                   rewrite_args->arg2)->setType(RefType::OWNED);
+        } else if (flags == METH_NOARGS) {
+            rtn = (Box*)func(self->passthrough, NULL);
+            if (rewrite_args)
+                rewrite_args->out_rtn
+                    = rewrite_args->rewriter->call(true, (void*)func, r_passthrough,
+                                                   rewrite_args->rewriter->loadConst(0, Location::forArg(1)))
+                          ->setType(RefType::OWNED);
+        } else if (flags == METH_O) {
+            rtn = (Box*)func(self->passthrough, arg1);
+            if (rewrite_args)
+                rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)func, r_passthrough,
+                                                                     rewrite_args->arg1)->setType(RefType::OWNED);
+        } else if ((flags & ~(METH_O3 | METH_D3)) == 0) {
+            assert(paramspec.totalReceived() <= 3); // would need to pass through oargs
+            rtn = ((Box * (*)(Box*, Box*, Box*, Box**))func)(self->passthrough, arg1, arg2, &arg3);
+            if (rewrite_args) {
+                if (paramspec.totalReceived() == 1)
+                    rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)func, r_passthrough,
+                                                                         rewrite_args->arg1)->setType(RefType::OWNED);
+                else if (paramspec.totalReceived() == 2)
+                    rewrite_args->out_rtn
+                        = rewrite_args->rewriter->call(true, (void*)func, r_passthrough, rewrite_args->arg1,
+                                                       rewrite_args->arg2)->setType(RefType::OWNED);
+                else if (paramspec.totalReceived() == 3) {
+                    auto args = rewrite_args->rewriter->allocate(1);
+                    args->setAttr(0, rewrite_args->arg3);
+                    rewrite_args->out_rtn
+                        = rewrite_args->rewriter->call(true, (void*)func, r_passthrough, rewrite_args->arg1,
+                                                       rewrite_args->arg2, args)->setType(RefType::OWNED);
+                } else
+                    abort();
+            }
+        } else if (flags == METH_OLDARGS) {
+            /* the really old style */
+
+            rewrite_args = NULL;
+
+            int size = PyTuple_GET_SIZE(arg1);
+            Box* arg = arg1;
+            if (size == 1)
+                arg = PyTuple_GET_ITEM(arg1, 0);
+            else if (size == 0)
+                arg = NULL;
+            rtn = func(self->passthrough, arg);
+        } else {
+            RELEASE_ASSERT(0, "0x%x", flags);
+        }
+
+        if (rewrite_args) {
+            if (S == CXX)
+                rewrite_args->rewriter->checkAndThrowCAPIException(rewrite_args->out_rtn);
+            rewrite_args->out_success = true;
+        }
+
+        if (S == CXX && !rtn)
+            throwCAPIException();
+        return rtn;
+    };
+
+    return callCXXFromStyle<S>([=]() {
+        return rearrangeArgumentsAndCall(paramspec, NULL, self->method_def->ml_name, defaults, rewrite_args, argspec,
+                                         arg1, arg2, arg3, args, keyword_names, continuation);
+    });
 }
 
 /* extension modules might be compiled with GC support so these
@@ -1571,34 +1570,6 @@ Box* BoxedCApiFunction::tppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPa
 #undef PyObject_GC_UnTrack
 #undef PyObject_GC_Del
 #undef _PyObject_GC_Malloc
-
-extern "C" PyObject* _PyObject_GC_Malloc(size_t basicsize) noexcept {
-    Box* r = ((PyObject*)PyObject_MALLOC(basicsize));
-    RELEASE_ASSERT(gc::isValidGCMemory(r), "");
-    return r;
-}
-
-#undef _PyObject_GC_New
-extern "C" PyObject* _PyObject_GC_New(PyTypeObject* tp) noexcept {
-    PyObject* op = _PyObject_GC_Malloc(_PyObject_SIZE(tp));
-    if (op != NULL)
-        op = PyObject_INIT(op, tp);
-    RELEASE_ASSERT(gc::isValidGCObject(op), "");
-    return op;
-}
-
-extern "C" PyVarObject* _PyObject_GC_NewVar(PyTypeObject* tp, Py_ssize_t nitems) noexcept {
-    const size_t size = _PyObject_VAR_SIZE(tp, nitems);
-    PyVarObject* op = (PyVarObject*)_PyObject_GC_Malloc(size);
-    if (op != NULL)
-        op = PyObject_INIT_VAR(op, tp, nitems);
-    RELEASE_ASSERT(gc::isValidGCObject(op), "");
-    return op;
-}
-
-extern "C" void PyObject_GC_Del(void* op) noexcept {
-    PyObject_FREE(op);
-}
 
 #ifdef HAVE_GCC_ASM_FOR_X87
 
@@ -1623,21 +1594,58 @@ extern "C" void _Py_FatalError(const char* fmt, const char* function, const char
     abort();
 }
 
-void setupCAPI() {
-    capifunc_cls->giveAttr("__repr__",
-                           new BoxedFunction(boxRTFunction((void*)BoxedCApiFunction::__repr__, UNKNOWN, 1)));
-
-    auto capi_call = new BoxedFunction(boxRTFunction((void*)BoxedCApiFunction::__call__, UNKNOWN, 1, 0, true, true));
-    capifunc_cls->giveAttr("__call__", capi_call);
-    capifunc_cls->tpp_call = BoxedCApiFunction::tppCall;
-    capifunc_cls->giveAttr("__name__",
-                           new (pyston_getset_cls) BoxedGetsetDescriptor(BoxedCApiFunction::getname, NULL, NULL));
-    capifunc_cls->giveAttr(
-        "__module__", new BoxedMemberDescriptor(BoxedMemberDescriptor::OBJECT, offsetof(BoxedCApiFunction, module)));
-
-    capifunc_cls->freeze();
+extern "C" int PyCFunction_ClearFreeList() noexcept {
+    return 0; // number of entries cleared
 }
 
-void teardownCAPI() {
+extern "C" int PyNumber_Coerce(PyObject** pv, PyObject** pw) noexcept {
+    int err = PyNumber_CoerceEx(pv, pw);
+    if (err <= 0)
+        return err;
+    PyErr_SetString(PyExc_TypeError, "number coercion failed");
+    return -1;
+}
+
+extern "C" int PyNumber_CoerceEx(PyObject** pv, PyObject** pw) noexcept {
+    PyObject* v = *pv;
+    PyObject* w = *pw;
+    int res;
+
+    /* Shortcut only for old-style types */
+    if (v->cls == w->cls && !PyType_HasFeature(v->cls, Py_TPFLAGS_CHECKTYPES)) {
+        Py_INCREF(v);
+        Py_INCREF(w);
+        return 0;
+    }
+    if (v->cls->tp_as_number && v->cls->tp_as_number->nb_coerce) {
+        res = (*v->cls->tp_as_number->nb_coerce)(pv, pw);
+        if (res <= 0)
+            return res;
+    }
+    if (w->cls->tp_as_number && w->cls->tp_as_number->nb_coerce) {
+        res = (*w->cls->tp_as_number->nb_coerce)(pw, pv);
+        if (res <= 0)
+            return res;
+    }
+    return 1;
+}
+
+void setupCAPI() {
+    capifunc_cls->giveAttr("__repr__", new BoxedFunction(BoxedCode::create((void*)BoxedCApiFunction::__repr__<CXX>,
+                                                                           UNKNOWN, 1, "capifunc.__repr__")));
+
+
+    auto capi_call
+        = new BoxedFunction(BoxedCode::create((void*)BoxedCApiFunction::__call__, UNKNOWN, 1, true, true,
+                                              "capifunc.__call__", "", ParamNames({ "self" }, "args", "kw")));
+    capifunc_cls->giveAttr("__call__", capi_call);
+    capifunc_cls->tpp_call.capi_val = BoxedCApiFunction::tppCall<CAPI>;
+    capifunc_cls->tpp_call.cxx_val = BoxedCApiFunction::tppCall<CXX>;
+    capifunc_cls->giveAttrDescriptor("__name__", BoxedCApiFunction::getname, NULL);
+    capifunc_cls->giveAttrDescriptor("__doc__", BoxedCApiFunction::doc, NULL);
+    capifunc_cls->giveAttrMember("__module__", T_OBJECT, offsetof(BoxedCApiFunction, module));
+
+    capifunc_cls->freeze();
+    capifunc_cls->tp_repr = BoxedCApiFunction::__repr__<CAPI>;
 }
 }

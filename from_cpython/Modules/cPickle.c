@@ -403,6 +403,7 @@ cPickle_ErrFormat(PyObject *ErrType, char *stringformat, char *format, ...)
 
     if (retval) {
         if (args) {
+            // Pyston note: this will end up calling into Python code even though an exception is currently set:
             PyObject *v;
             v=PyString_Format(retval, args);
             Py_DECREF(retval);
@@ -2087,7 +2088,9 @@ save_inst(Picklerobject *self, PyObject *args)
     }
 
     if (!self->bin) {
-        if (!( name = ((PyClassObject *)class)->cl_name ))  {
+        // Pyston change:
+        // if (!( name = ((PyClassObject *)class)->cl_name ))  {
+        if (!( name = PyClass_Name(class)))  {
             PyErr_SetString(PicklingError, "class has no name");
             goto finally;
         }
@@ -2689,6 +2692,14 @@ save(Picklerobject *self, PyObject *args, int pers_save)
         }
         break;
 
+    // Pyston change: add support for attrwrapper
+    case 'a':
+        if (type == &PyAttrWrapper_Type) {
+            res = save_dict(self, args);
+            goto finally;
+        }
+        break;
+
     case 'i':
         if (type == &PyInstance_Type) {
             res = save_inst(self, args);
@@ -2698,6 +2709,12 @@ save(Picklerobject *self, PyObject *args, int pers_save)
 
     case 'c':
         if (type == &PyClass_Type) {
+            res = save_global(self, args, NULL);
+            goto finally;
+        }
+
+        // Pyston change: moved because we call this type 'capifunc'
+        if (type == &PyCFunction_Type) {
             res = save_global(self, args, NULL);
             goto finally;
         }
@@ -2716,7 +2733,15 @@ save(Picklerobject *self, PyObject *args, int pers_save)
         break;
 
     case 'b':
+        // Pyston change: moved because we call this type 'capifunc'
+        /*
         if (type == &PyCFunction_Type) {
+            res = save_global(self, args, NULL);
+            goto finally;
+        }
+        */
+        // Pyston change: added handler for 'builtin_function_or_method'
+        if (type == &PyBuiltinFunction_Type) {
             res = save_global(self, args, NULL);
             goto finally;
         }
@@ -5863,11 +5888,15 @@ init_stuff(PyObject *module_dict)
 {
     PyObject *copyreg, *t, *r;
 
-#define INIT_STR(S) if (!( S ## _str=PyString_InternFromString(#S)))  return -1;
+#define INIT_STR(S) if (!( S ## _str=PyGC_RegisterStaticConstant(PyString_InternFromString(#S))))  return -1;
 
     if (PyType_Ready(&Unpicklertype) < 0)
         return -1;
     if (PyType_Ready(&Picklertype) < 0)
+        return -1;
+
+    // Pyston change:
+    if (PyType_Ready(&PdataType) < 0)
         return -1;
 
     INIT_STR(__class__);
@@ -5890,24 +5919,24 @@ init_stuff(PyObject *module_dict)
 
     /* This is special because we want to use a different
        one in restricted mode. */
-    dispatch_table = PyObject_GetAttr(copyreg, dispatch_table_str);
+    dispatch_table = PyGC_RegisterStaticConstant(PyObject_GetAttr(copyreg, dispatch_table_str));
     if (!dispatch_table) return -1;
 
-    extension_registry = PyObject_GetAttrString(copyreg,
-                            "_extension_registry");
+    extension_registry = PyGC_RegisterStaticConstant(PyObject_GetAttrString(copyreg,
+                            "_extension_registry"));
     if (!extension_registry) return -1;
 
-    inverted_registry = PyObject_GetAttrString(copyreg,
-                            "_inverted_registry");
+    inverted_registry = PyGC_RegisterStaticConstant(PyObject_GetAttrString(copyreg,
+                            "_inverted_registry"));
     if (!inverted_registry) return -1;
 
-    extension_cache = PyObject_GetAttrString(copyreg,
-                            "_extension_cache");
+    extension_cache = PyGC_RegisterStaticConstant(PyObject_GetAttrString(copyreg,
+                            "_extension_cache"));
     if (!extension_cache) return -1;
 
     Py_DECREF(copyreg);
 
-    if (!(empty_tuple = PyTuple_New(0)))
+    if (!(empty_tuple = PyGC_RegisterStaticConstant(PyTuple_New(0))))
         return -1;
 
     two_tuple = PyTuple_New(2);
@@ -5918,11 +5947,16 @@ init_stuff(PyObject *module_dict)
      * want anything looking at two_tuple() by magic.
      */
     PyObject_GC_UnTrack(two_tuple);
+    // Pyston change: try a bit harder to disregard this object.
+    _Py_ForgetReference(two_tuple);
+    _Py_DEC_REFTOTAL;
 
     /* Ugh */
     if (!( t=PyImport_ImportModule("__builtin__")))  return -1;
     if (PyDict_SetItemString(module_dict, "__builtins__", t) < 0)
         return -1;
+    // Pyston change: I think you need this
+    Py_DECREF(t);
 
     if (!( t=PyDict_New()))  return -1;
     if (!( r=PyRun_String(

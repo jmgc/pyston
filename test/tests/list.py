@@ -1,3 +1,5 @@
+import sys
+
 l = range(5)
 print l
 print l * 5
@@ -61,14 +63,14 @@ list_index = [1, 2, 3, 4, 5]
 for i in xrange(1, 6):
     assert list_index.index(i) == i-1
     try:
-        print list_index.index(i, 3, 4)
+        print list_index.index(i, 3L, 4L)
     except ValueError as e:
         print e
     try:
         print list_index.index(i, -1, -1)
     except ValueError as e:
         print e
-        
+
 assert list_index.index(3) == 2
 assert [1, '2'].index('2') == 1
 
@@ -85,7 +87,7 @@ while l:
     del l[0]
 
 l = range(5)
-l.extend(range(5))
+print l.extend(range(5))
 print l
 
 # Repeating a list
@@ -167,6 +169,8 @@ l = range(5)
 l[2:4] = tuple(range(2))
 print l
 
+l[::-1] = l
+print l
 
 l = [None]*4
 try:
@@ -209,3 +213,73 @@ print l
 """
 
 print repr(list.__hash__)
+
+class RaisingCmp(object):
+    def __eq__(self, other):
+        1/0
+try:
+    RaisingCmp() in [1, 2, 3]
+except ZeroDivisionError as e:
+    print e
+
+class D(object):
+    def __rmul__(self, other):
+        return other * 2
+
+d = D()
+
+try:
+    print([1, 2] * 3.5)
+except TypeError as e:
+    print(type(e))
+
+try:
+    print([1, 2] * d)
+except TypeError as e:
+    print(type(e))
+
+try:
+    print range(5).index(10, 100L, 200L)
+except Exception as e:
+    print e
+try:
+    print range(5).index(10, 100, 200)
+except Exception as e:
+    print e
+
+
+lst = [4, 5, 6, 7]
+n = int((sys.maxsize * 2 + 2) // len(lst))
+
+try:
+    lst * n
+except MemoryError as e:
+    print e
+else:
+    raise RuntimeError('MemoryError not raised')
+
+try:
+    lst *= n
+except MemoryError as e:
+    print e
+
+l = [1, 2, 3]
+l.__init__()
+print l
+
+class EvilCmp:
+    def __init__(self, victim):
+        self.victim = victim
+    def __eq__(self, other):
+        del self.victim[:]
+        return False
+a = []
+a[:] = [EvilCmp(a) for _ in xrange(100)]
+try:
+    a.index(None)
+except ValueError as e:
+    print e
+
+a_list = [(0, 0, 0), (1.0, 2, 0.0), (1.0, 3, 0.0)]
+reverse_list = sorted(a_list, key=lambda x: x[0], reverse=True)
+print(reverse_list)

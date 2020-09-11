@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 #ifndef PYSTON_RUNTIME_ICS_H
 #define PYSTON_RUNTIME_ICS_H
 
+#include "codegen/unwinding.h" // RegisterEHFrame
 #include "core/common.h"
 #include "runtime/objmodel.h"
 
@@ -22,32 +23,18 @@ namespace pyston {
 
 class ICInfo;
 
-class EHFrameManager {
-private:
-    void* eh_frame_addr;
-    bool omit_frame_pointer;
-
-public:
-    EHFrameManager(bool omit_frame_pointer) : eh_frame_addr(NULL), omit_frame_pointer(omit_frame_pointer) {}
-    ~EHFrameManager();
-    void writeAndRegister(void* func_addr, uint64_t func_size);
-};
-
 class RuntimeIC {
 private:
-    void* addr;
-#ifndef NVALGRIND
-    size_t total_size;
-#endif
-    EHFrameManager eh_frame;
+    void* addr; // points to function start not the start of the allocated memory block.
 
+    RegisterEHFrame register_eh_frame;
     std::unique_ptr<ICInfo> icinfo;
 
     RuntimeIC(const RuntimeIC&) = delete;
     void operator=(const RuntimeIC&) = delete;
 
 protected:
-    RuntimeIC(void* addr, int num_slots, int slot_size);
+    RuntimeIC(void* addr, int total_size);
     ~RuntimeIC();
 
     template <class... Args> uint64_t call_int(Args... args) {
@@ -69,7 +56,7 @@ protected:
 
 class CallattrIC : public RuntimeIC {
 public:
-    CallattrIC() : RuntimeIC((void*)callattr, 1, 320) {}
+    CallattrIC() : RuntimeIC((void*)callattr, 512) {}
 
     Box* call(Box* obj, BoxedString* attr, CallattrFlags flags, Box* arg0, Box* arg1, Box* arg2, Box** args,
               const std::vector<BoxedString*>* keyword_names) {
@@ -77,16 +64,27 @@ public:
     }
 };
 
+class CallattrCapiIC : public RuntimeIC {
+public:
+    CallattrCapiIC() : RuntimeIC((void*)callattrCapi, 512) {}
+
+    Box* call(Box* obj, BoxedString* attr, CallattrFlags flags, Box* arg0, Box* arg1, Box* arg2, Box** args,
+              const std::vector<BoxedString*>* keyword_names) {
+        return (Box*)call_ptr(obj, attr, flags, arg0, arg1, arg2, args, keyword_names);
+    }
+};
+
+
 class BinopIC : public RuntimeIC {
 public:
-    BinopIC() : RuntimeIC((void*)binop, 2, 240) {}
+    BinopIC() : RuntimeIC((void*)binop, 512) {}
 
     Box* call(Box* lhs, Box* rhs, int op_type) { return (Box*)call_ptr(lhs, rhs, op_type); }
 };
 
 class NonzeroIC : public RuntimeIC {
 public:
-    NonzeroIC() : RuntimeIC((void*)nonzero, 1, 40) {}
+    NonzeroIC() : RuntimeIC((void*)nonzero, 512) {}
 
     bool call(Box* obj) { return call_bool(obj); }
 };

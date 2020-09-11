@@ -1,4 +1,4 @@
-SHELL := /bin/bash
+SHELL := /usr/bin/env sh
 
 # prints variables for debugging
 print-%: ; @echo $($*)
@@ -6,7 +6,6 @@ print-%: ; @echo $($*)
 # Disable builtin rules:
 .SUFFIXES:
 
-USE_TEST_LLVM := 0
 DEPS_DIR := $(HOME)/pyston_deps
 
 SRC_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
@@ -20,7 +19,7 @@ USE_CCACHE := 1
 USE_DISTCC := 0
 
 PYPY := pypy
-CPYTHON := python
+CPYTHON := python2
 
 ENABLE_VALGRIND := 0
 
@@ -32,12 +31,8 @@ GTEST_DIR := $(DEPS_DIR)/gtest-1.7.0
 
 USE_DEBUG_LIBUNWIND := 0
 
-PYTHON_MAJOR_VERSION := 2
-PYTHON_MINOR_VERSION := 7
-PYTHON_MICRO_VERSION := 3
-
-MAX_MEM_KB := 500000
-MAX_DBG_MEM_KB := 500000
+MAX_MEM_KB := 1500000
+MAX_DBG_MEM_KB := 1500000
 
 TEST_THREADS := 1
 
@@ -53,15 +48,10 @@ ENABLE_INTEL_JIT_EVENTS := 0
 CTAGS := ctags
 ETAGS := ctags-exuberant -e
 
-# Setting this to 1 will set the Makefile to use binaries from the trunk
-# directory, even if USE_TEST_LLVM is set to 1.
-# This is useful if clang isn't installed into the test directory, ex due
-# to disk space concerns.
-FORCE_TRUNK_BINARIES := 0
-
 NINJA := ninja
 
 CMAKE_DIR_DBG := $(BUILD_DIR)/Debug
+CMAKE_DIR_DBG_TO_SRC := ../.. # Relative path from $(CAMKE_DIR_DBG) to $(SRC_DIR).  Not sure how to calculate this automatically.
 CMAKE_DIR_RELEASE := $(BUILD_DIR)/Release
 CMAKE_DIR_GCC := $(BUILD_DIR)/Debug-gcc
 CMAKE_DIR_RELEASE_GCC := $(BUILD_DIR)/Release-gcc
@@ -101,18 +91,11 @@ else
 endif
 
 LLVM_TRUNK_SRC := $(DEPS_DIR)/llvm-trunk
-LLVM_TEST_SRC := $(DEPS_DIR)/llvm-test
-LLVM_TRUNK_BUILD := $(DEPS_DIR)/llvm-trunk-build
-LLVM_TEST_BUILD := $(DEPS_DIR)/llvm-test-build
-ifneq ($(USE_TEST_LLVM),0)
-	LLVM_SRC := $(LLVM_TEST_SRC)
-	LLVM_BUILD := $(LLVM_TEST_BUILD)
-else
-	LLVM_SRC := $(LLVM_TRUNK_SRC)
-	LLVM_BUILD := $(LLVM_TRUNK_BUILD)
-endif
+LLVM_SRC := $(LLVM_TRUNK_SRC)
+LLVM_INC_DBG := ./build/Debug/llvm
 
 LLVM_BIN := ./build/Release/llvm/bin
+LLVM_BIN_DBG := ./build/Debug/llvm/bin
 
 LLVM_LINK_LIBS := core mcjit native bitreader bitwriter ipo irreader debuginfodwarf instrumentation
 ifneq ($(ENABLE_INTEL_JIT_EVENTS),0)
@@ -122,37 +105,6 @@ endif
 NEED_OLD_JIT := $(shell if [ $(LLVM_REVISION) -le 216982 ]; then echo 1; else echo 0; fi )
 ifeq ($(NEED_OLD_JIT),1)
 	LLVM_LINK_LIBS += jit
-endif
-
-LLVM_CONFIG_DBG := $(LLVM_BUILD)/Release+Asserts/bin/llvm-config
-ifneq ($(wildcard $(LLVM_CONFIG_DBG)),)
-LLVM_CXXFLAGS := $(shell $(LLVM_BUILD)/Release+Asserts/bin/llvm-config --cxxflags)
-LLVM_LDFLAGS := $(shell $(LLVM_BUILD)/Release+Asserts/bin/llvm-config --ldflags --system-libs --libs $(LLVM_LINK_LIBS))
-LLVM_LIB_DEPS := $(wildcard $(LLVM_BUILD)/Release+Asserts/lib/*)
-else
-LLVM_CXXFLAGS := DBG_NOT_BUILT
-LLVM_LDFLAGS := DBG_NOT_BUILT
-LLVM_LIB_DEPS := DBG_NOT_BUILT
-endif
-
-LLVM_CONFIG_DEBUG := $(LLVM_BUILD)/Debug+Asserts/bin/llvm-config
-ifneq ($(wildcard $(LLVM_CONFIG_DEBUG)),)
-LLVM_DEBUG_LDFLAGS := $(shell $(LLVM_BUILD)/Debug+Asserts/bin/llvm-config --ldflags --system-libs --libs $(LLVM_LINK_LIBS))
-LLVM_DEBUG_LIB_DEPS := $(wildcard $(LLVM_BUILD)/Debug+Asserts/lib/*)
-else
-LLVM_DEBUG_LDFLAGS := DEBUG_NOT_BUILT
-LLVM_DEBUG_LIB_DEPS := DEBUG_NOT_BUILT
-endif
-
-LLVM_CONFIG_RELEASE := $(LLVM_BUILD)/Release/bin/llvm-config
-ifneq ($(wildcard $(LLVM_CONFIG_RELEASE)),)
-LLVM_RELEASE_CXXFLAGS := $(shell $(LLVM_BUILD)/Release/bin/llvm-config --cxxflags)
-LLVM_RELEASE_LDFLAGS := $(shell $(LLVM_BUILD)/Release/bin/llvm-config --ldflags --system-libs --libs $(LLVM_LINK_LIBS))
-LLVM_RELEASE_LIB_DEPS := $(wildcard $(LLVM_BUILD)/Release/lib/*)
-else
-LLVM_RELEASE_CXXFLAGS := RELEASE_NOT_BUILT
-LLVM_RELEASE_LDFLAGS := RELEASE_NOT_BUILT
-LLVM_RELEASE_LIB_DEPS := RELEASE_NOT_BUILT
 endif
 
 ifneq ($(wildcard /usr/local/include/llvm),)
@@ -166,12 +118,6 @@ ifneq ($(wildcard /usr/local/include/llvm),)
 $(error "Error: global llvm include files detected")
 endif
 
-# Note: use lazy-expansion for these profile targets, since calling the profile llvm-config will
-# actually generate a gmon.out file!
-LLVM_PROFILE_CXXFLAGS = $(shell $(LLVM_BUILD)/Release+Profile/bin/llvm-config --cxxflags) -UNDEBUG
-LLVM_PROFILE_LDFLAGS = $(shell $(LLVM_BUILD)/Release+Profile/bin/llvm-config --ldflags --system-libs --libs $(LLVM_LINK_LIBS))
-LLVM_PROFILE_LIB_DEPS := $(wildcard $(LLVM_BUILD)/Release+Profile/lib/*)
-
 CLANG_EXE := $(LLVM_BIN)/clang
 CLANGPP_EXE := $(LLVM_BIN)/clang++
 
@@ -184,7 +130,6 @@ COMMON_CXXFLAGS += -Woverloaded-virtual
 COMMON_CXXFLAGS += -fexceptions -fno-rtti
 COMMON_CXXFLAGS += -Wno-invalid-offsetof # allow the use of "offsetof", and we'll just have to make sure to only use it legally.
 COMMON_CXXFLAGS += -DENABLE_INTEL_JIT_EVENTS=$(ENABLE_INTEL_JIT_EVENTS)
-COMMON_CXXFLAGS += -I$(DEPS_DIR)/pypa-install/include
 COMMON_CXXFLAGS += -I$(DEPS_DIR)/lz4-install/include
 
 ifeq ($(ENABLE_VALGRIND),0)
@@ -198,11 +143,9 @@ else
 endif
 
 COMMON_CXXFLAGS += -DGITREV=$(shell git rev-parse HEAD | head -c 12) -DLLVMREV=$(LLVM_REVISION)
-COMMON_CXXFLAGS += -DDEFAULT_PYTHON_MAJOR_VERSION=$(PYTHON_MAJOR_VERSION) -DDEFAULT_PYTHON_MINOR_VERSION=$(PYTHON_MINOR_VERSION) -DDEFAULT_PYTHON_MICRO_VERSION=$(PYTHON_MICRO_VERSION)
 
 # Use our "custom linker" that calls gold if available
 COMMON_LDFLAGS := -B$(TOOLS_DIR)/build_system -L/usr/local/lib -lpthread -lm -lunwind -llzma -L$(DEPS_DIR)/gcc-4.8.2-install/lib64 -lreadline -lgmp -lssl -lcrypto -lsqlite3
-COMMON_LDFLAGS += $(DEPS_DIR)/pypa-install/lib/libpypa.a
 COMMON_LDFLAGS += $(DEPS_DIR)/lz4-install/lib/liblz4.a
 
 # Conditionally add libtinfo if available - otherwise nothing will be added
@@ -245,8 +188,7 @@ LDFLAGS_RELEASE := $(LLVM_RELEASE_LDFLAGS) $(COMMON_LDFLAGS)
 
 
 BUILD_SYSTEM_DEPS := Makefile Makefile.local $(wildcard build_system/*)
-CLANG_DEPS := $(CLANGPP_EXE) $(abspath $(dir $(CLANGPP_EXE))/../../built_release)
-$(CLANGPP_EXE) $(CLANG_EXE): $(abspath $(dir $(CLANGPP_EXE))/../../built_release)
+CLANG_DEPS := $(CLANGPP_EXE)
 
 # settings to make clang and ccache play nicely:
 CLANG_CCACHE_FLAGS := -Qunused-arguments
@@ -308,20 +250,11 @@ else ifeq ($(USE_DISTCC),1)
 	CXX := distcc $(CXX)
 	CXX_PROFILE := distcc $(CXX_PROFILE)
 	CLANG_CXX := distcc $(CLANG_CXX)
-	LLVM_BUILD_VARS += CXX='distcc $(GPP)'
-endif
-ifeq ($(USE_DISTCC),1)
-	LLVM_BUILD_ENV += CCACHE_PREFIX=distcc
-endif
-ifeq ($(USE_CCACHE),1)
-	LLVM_BUILD_VARS += CXX='ccache $(GPP)'
 endif
 CXX := $(CXX_ENV) $(CXX)
 CXX_PROFILE := $(CXX_ENV) $(CXX_PROFILE)
 CC := $(CC_ENV) $(CC)
 CLANG_CXX := $(CXX_ENV) $(CLANG_CXX)
-# Not sure if ccache_basedir actually helps at all (I think the generated files make them different?)
-LLVM_BUILD_ENV += CCACHE_DIR=$(HOME)/.ccache_llvm CCACHE_BASEDIR=$(LLVM_SRC)
 
 BASE_SRCS := $(wildcard src/codegen/*.cpp) $(wildcard src/asm_writing/*.cpp) $(wildcard src/codegen/irgen/*.cpp) $(wildcard src/codegen/opt/*.cpp) $(wildcard src/analysis/*.cpp) $(wildcard src/core/*.cpp) src/codegen/profiling/profiling.cpp src/codegen/profiling/dumprof.cpp $(wildcard src/runtime/*.cpp) $(wildcard src/runtime/builtin_modules/*.cpp) $(wildcard src/gc/*.cpp) $(wildcard src/capi/*.cpp)
 MAIN_SRCS := $(BASE_SRCS) src/jit.cpp
@@ -402,7 +335,7 @@ STDOBJECT_SRCS := \
 	iterobject.c \
 	bufferobject.c \
 	cobject.c \
-	dictproxy.c \
+	descrobject.c \
 	$(EXTRA_STDOBJECT_SRCS)
 
 STDPYTHON_SRCS := \
@@ -463,7 +396,7 @@ all: pyston_dbg pyston_release pyston_gcc unittests check-deps $(RUN_DEPS)
 ALL_HEADERS := $(wildcard src/*/*.h) $(wildcard src/*/*/*.h) $(wildcard from_cpython/Include/*.h)
 tags: $(SRCS) $(OPTIONAL_SRCS) $(FROM_CPYTHON_SRCS) $(ALL_HEADERS)
 	$(ECHO) Calculating tags...
-	$(VERB) $(CTAGS) $^
+	$(VERB) $(CTAGS) -I noexcept -I noexcept+ -I PYSTON_NOEXCEPT -I STOLEN -I BORROWED $^
 
 TAGS: $(SRCS) $(OPTIONAL_SRCS) $(FROM_CPYTHON_SRCS) $(ALL_HEADERS)
 	$(ECHO) Calculating TAGS...
@@ -478,21 +411,20 @@ $1_unittest:
 	$(NINJA) -C $(CMAKE_DIR_DBG) $1_unittest $(NINJAFLAGS)
 	ln -sf $(CMAKE_DIR_DBG)/$1_unittest .
 dbg_$1_unittests: $1_unittest
-	zsh -c 'ulimit -m $(MAX_MEM_KB); time $(GDB) $(GDB_CMDS) --args ./$1_unittest --gtest_break_on_failure $(ARGS)'
+	zsh -c 'ulimit -v $(MAX_MEM_KB); time $(GDB) $(GDB_CMDS) --args ./$1_unittest --gtest_break_on_failure $(ARGS)'
 unittests:: $1_unittest
 run_$1_unittests: $1_unittest
-	zsh -c 'ulimit -m $(MAX_MEM_KB); time ./$1_unittest $(ARGS)'
+	zsh -c 'ulimit -v $(MAX_MEM_KB); time ./$1_unittest $(ARGS)'
 run_unittests:: run_$1_unittests
 )
 endef
 
-GDB_CMDS := $(GDB_PRE_CMDS) --ex "set confirm off" --ex "handle SIGUSR2 pass nostop noprint" --ex run --ex "bt 20" $(GDB_POST_CMDS)
+GDB_CMDS := $(GDB_PRE_CMDS) --ex "source pyston_gdbinit.txt" --ex "run" --ex "bt 20" $(GDB_POST_CMDS)
 BR ?=
 ARGS ?=
 ifneq ($(BR),)
 	override GDB_CMDS := --ex "break $(BR)" $(GDB_CMDS)
 endif
-$(call add_unittest,gc)
 $(call add_unittest,analysis)
 
 
@@ -532,179 +464,17 @@ check:
 quick_check:
 	$(MAKE) pyston_dbg
 	$(MAKE) check-deps
-	( cd $(CMAKE_DIR_DBG) && ctest -V -R 'check-format|unittests|pyston_defaults_tests|pyston_defaults_cpython' )
+	( cd $(CMAKE_DIR_DBG) && ctest -V -R '^(check-format|unittests|pyston_defaults_tests|pyston_defaults_cpython)$$' )
 
 
 Makefile.local:
 	echo "Creating default Makefile.local"
-	python -c 'import sys; v = sys.version_info; print "PYTHON_MAJOR_VERSION:=%d\nPYTHON_MINOR_VERSION:=%d\nPYTHON_MICRO_VERSION:=%d" % (v[0], v[1], v[2])' > Makefile.local || (rm $@; false)
+	(which ninja-build >/dev/null && echo "NINJA := ninja-build" >> Makefile.local); true
+	touch Makefile.local
 
-#################
-# LLVM rules:
-
-#
-# This is probably my worst makefile hackery:
-# - if you change the patch, the llvm_* targets should be rebuilt when you build a pyston target that depends on them
-# - they shouldn't be rebuilt if the built_* rule doesn't indicate it
-# - should rebuild the pyston targets *if and only if* one of their dependencies actually changes in the rebuild
-# -- make should report them as "up to date"
-
-LLVM_CONFIGURATION := $(LLVM_BUILD)/Makefile.config
-# First, specify when we need to rebuild the different targets:
-$(LLVM_BUILD)/built_quick: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	$(MAKE) llvm_quick
-$(LLVM_BUILD)/built_debug: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	$(MAKE) llvm_debug
-$(LLVM_BUILD)/built_release: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	$(MAKE) llvm_release
-$(LLVM_BUILD)/built_profile: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	$(MAKE) llvm_profile
-# Now, specify that we shouldn't check the timestamps of dependencies until after
-# the llvm rebuild finishes, if one is happening, but do it with order-only
-# dependencies so that make doesn't consider the libraries out of date
-# if they didn't get updated in the llvm rebuild:
-# $(CLANGPP_EXE): | $(LLVM_TRUNK)/built_release
-$(LLVM_LIB_DEPS): | $(LLVM_BUILD)/built_quick
-$(LLVM_DEBUG_LIB_DEPS): | $(LLVM_BUILD)/built_debug
-$(LLVM_RELEASE_LIB_DEPS): | $(LLVM_BUILD)/built_release
-$(LLVM_PROFILE_LIB_DEPS): | $(LLVM_BUILD)/built_profile
-# Now, put together some variables for later; pyston targets will have to depend on the lib_deps
-# so they can be rebuilt properly, but also the built_* targets to force a rebuild if appropriate
-# (because the lib_deps dependency won't cause a rebuild on their own)
-LLVM_DEPS := $(LLVM_LIB_DEPS) $(LLVM_BUILD)/built_quick
-LLVM_DEBUG_DEPS := $(LLVM_DEBUG_LIB_DEPS) $(LLVM_BUILD)/built_debug
-LLVM_RELEASE_DEPS := $(LLVM_RELEASE_LIB_DEPS) $(LLVM_BUILD)/built_release
-LLVM_PROFILE_DEPS := $(LLVM_PROFILE_LIB_DEPS) $(LLVM_BUILD)/built_profile
-# end worst makefile hackery
-
-LLVM_BUILDS := quick release debug profile
-# Tools for all builds (note: don't include llvm-config)
-LLVM_TOOLS := llc opt
-
-ifneq (,$(findstring llvm_debug,$(MAKECMDGOALS)))
-FIRST_LLVM_BUILD := debug
-else ifneq (,$(findstring llvm_quick,$(MAKECMDGOALS)))
-FIRST_LLVM_BUILD := quick
-else
-FIRST_LLVM_BUILD := release
-endif
-NONFIRST_LLVM_BUILDS := $(filter-out $(FIRST_LLVM_BUILD),$(LLVM_BUILDS))
-.PHONY: llvm llvm_configs $(patsubst %,llvm_%,$(LLVM_BUILDS)) llvm/% llvm_up
-llvm: llvm_configs $(LLVM_BUILDS:%=llvm_%)
-llvm_configs: $(LLVM_BUILDS:%=llvm/%/tools/llvm-config)
-# Use the configure-created Makefile as evidence that llvm has been configured:
-.PHONY: llvm_configure
-llvm_configure:
-	rm -f $(LLVM_BUILD)/Makefile.config
-	$(MAKE) $(LLVM_CONFIGURATION)
-
-# Put the llvm_configure line in its own file, so that we can force an llvm reconfigure
-# if we change the configuration parameters.
-# (All non-llvm build targets get rebuilt if the main Makefile is touched, but that is too
-# expensive to do for the llvm ones.)
-LLVM_CONFIG_INCL := Makefile.llvmconfig
-# Sets LLVM_CONFIGURE_LINE:
-include $(LLVM_CONFIG_INCL)
-ifeq (,$(LLVM_CONFIGURE_LINE))
-$(error "did not set configure line")
-endif
-ifneq ($(ENABLE_INTEL_JIT_EVENTS),0)
-LLVM_CONFIGURE_LINE += --with-intel-jitevents
-endif
-
-$(LLVM_CONFIGURATION): $(LLVM_SRC)/configure $(LLVM_CONFIG_INCL) | $(LLVM_SRC)/_patched
-	mkdir -p $(LLVM_BUILD)
-	cd $(LLVM_BUILD) ; \
-	$(LLVM_CONFIGURE_LINE)
-	# CXX=ccache\ g++ ./configure --enable-targets=host
-	# CXX='env CCACHE_PREFIX=distcc ccache g++' ./configure --enable-targets=host
-
-# Use "Static Pattern Rules" instead of implicit rules to avoid needing to reuse the same implicit rule in a single chain:
-define add_llvm_dep
-$(eval \
-$(LLVM_BUILDS:%=llvm/%/$1): llvm/%/$1: llvm/%/$2
-)
-endef
-
-###
-# LLVM build dependency management:
-$(call add_llvm_dep,lib/TableGen,lib/Support)
-$(call add_llvm_dep,utils/TableGen,lib/TableGen)
-$(call add_llvm_dep,lib/IR,utils/TableGen)
-$(call add_llvm_dep,lib/Target,lib/IR)
-$(call add_llvm_dep,lib/Target,utils/TableGen)
-# There are some shared targets in the Target subdirectory, which will make a parallel make fail
-# if you try to build multiple llvm builds at the same time.  Work around this by
-# serializing the non-release Target builds to after the release one:
-$(NONFIRST_LLVM_BUILDS:%=llvm/%/lib/Target): llvm/%/lib/Target: llvm/$(FIRST_LLVM_BUILD)/lib/Target
-$(NONFIRST_LLVM_BUILDS:%=llvm/%/tools/llvm-config): llvm/%/tools/llvm-config: llvm/$(FIRST_LLVM_BUILD)/tools/llvm-config
-$(call add_llvm_dep,lib,lib/Target)
-$(call add_llvm_dep,tools/llvm-config,lib/Support)
-$(call add_llvm_dep,tools,lib)
-$(call add_llvm_dep,tools,utils/unittest)
-$(call add_llvm_dep,utils,lib)
-# The tools need to individually depend on the lib directory:
-$(foreach tool,$(LLVM_TOOLS),$(foreach build,$(LLVM_BUILDS),$(eval \
-llvm/$(build)/tools/$(tool): llvm/$(build)/lib \
-)))
-
-##
-# LLVM build subset specifications:
-$(LLVM_BUILDS:%=llvm_%): llvm_%: llvm/%/lib llvm/%/tools/llvm-config
-	touch $(LLVM_BUILD)/$(patsubst llvm_%,built_%,$@)
-llvm_release: llvm/release/tools llvm/release/utils
-llvm_quick: $(LLVM_TOOLS:%=llvm/quick/tools/%)
-llvm_debug: $(LLVM_TOOLS:%=llvm/debug/tools/%)
-
-llvm_quick_clean:
-	$(MAKE) -C $(LLVM_BUILD) ENABLE_OPTIMIZED=1 clean
-llvm_release_%:
-	$(MAKE) -C $(LLVM_BUILD) ENABLE_OPTIMIZED=1 DISABLE_ASSERTIONS=1 $(patsubst llvm_release_%,%,$@)
-llvm_debug_clean:
-	$(MAKE) -C $(LLVM_BUILD) DEBUG_RUNTIME=1 DEBUG_SYMBOLS=1 ENABLE_OPTIMIZED=0 clean
-llvm_profile_clean:
-	$(MAKE) -C $(LLVM_BUILD) ENABLE_PROFILING=1 ENABLE_OPTIMIZED=1 DISABLE_ASSERTIONS=1 clean
-llvm_allclean: $(patsubst %,llvm_%_clean,$(LLVM_BUILDS))
-	cd $(LLVM_SRC) ; git checkout .
-	rm -rfv $(LLVM_BUILD)/*
-llvm_install: llvm_release
-	sudo $(MAKE) -C $(LLVM_SRC)/tools ENABLE_OPTIMIZED=1 DISABLE_ASSERTIONS=1 install
-
-# Clear OPTIONAL_DIRS and OPTIONAL_PARALLEL_DIRS to make sure that clang doesn't get built+tested
-llvm_test: llvm_test_quick
-llvm_test_quick: llvm_quick llvm/quick/tools/opt
-	$(MAKE) -C $(LLVM_BUILD) OPTIONAL_DIRS= OPTIONAL_PARALLEL_DIRS= ENABLE_OPTIMIZED=1 check
-llvm_test_release: llvm_release
-	$(MAKE) -C $(LLVM_BUILD) OPTIONAL_DIRS= OPTIONAL_PARALLEL_DIRS= ENABLE_OPTIMIZED=1 DISABLE_ASSERTIONS=1 check
-llvm_test_all: llvm_release
-	$(MAKE) -C $(LLVM_BUILD) ENABLE_OPTIMIZED=1 DISABLE_ASSERTIONS=1 check-all
-
-llvm/quick/%: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	mkdir -p $(patsubst llvm/quick/%,$(LLVM_BUILD)/%,$@)
-	$(VERB) if [ ! -f $(patsubst llvm/quick/%,$(LLVM_BUILD)/%/Makefile,$@) ]; then cp $(patsubst llvm/quick/%,$(LLVM_SRC)/%/Makefile,$@) $(patsubst llvm/quick/%,$(LLVM_BUILD)/%/,$@); fi
-	$(LLVM_BUILD_ENV) $(MAKE) -C $(patsubst llvm/quick/%,$(LLVM_BUILD)/%,$@) $(LLVM_BUILD_VARS) ENABLE_OPTIMIZED=1 DEBUG_RUNTIME=0 NO_DEBUG_SYMBOLS=1
-llvm/release/%: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	mkdir -p $(patsubst llvm/release/%,$(LLVM_BUILD)/%,$@)
-	$(VERB) if [ ! -f $(patsubst llvm/release/%,$(LLVM_BUILD)/%/Makefile,$@) ]; then cp $(patsubst llvm/release/%,$(LLVM_SRC)/%/Makefile,$@) $(patsubst llvm/release/%,$(LLVM_BUILD)/%/,$@); fi
-	$(LLVM_BUILD_ENV) $(MAKE) -C $(patsubst llvm/release/%,$(LLVM_BUILD)/%,$@) $(LLVM_BUILD_VARS) ENABLE_OPTIMIZED=1 DISABLE_ASSERTIONS=1
-llvm/debug/%: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	mkdir -p $(patsubst llvm/debug/%,$(LLVM_BUILD)/%,$@)
-	$(VERB) if [ ! -f $(patsubst llvm/debug/%,$(LLVM_BUILD)/%/Makefile,$@) ]; then cp $(patsubst llvm/debug/%,$(LLVM_SRC)/%/Makefile,$@) $(patsubst llvm/debug/%,$(LLVM_BUILD)/%/,$@); fi
-	$(LLVM_BUILD_ENV) $(MAKE) -C $(patsubst llvm/debug/%,$(LLVM_BUILD)/%,$@) $(LLVM_BUILD_VARS) DEBUG_RUNTIME=1 DEBUG_SYMBOLS=1 ENABLE_OPTIMIZED=0
-llvm/profile/%: $(LLVM_SRC)/_patched $(LLVM_CONFIGURATION)
-	mkdir -p $(patsubst llvm/profile/%,$(LLVM_BUILD)/%,$@)
-	$(VERB) if [ ! -f $(patsubst llvm/profile/%,$(LLVM_BUILD)/%/Makefile,$@) ]; then cp $(patsubst llvm/profile/%,$(LLVM_SRC)/%/Makefile,$@) $(patsubst llvm/profile/%,$(LLVM_BUILD)/%/,$@); fi
-	$(LLVM_BUILD_ENV) $(MAKE) -C $(patsubst llvm/profile/%,$(LLVM_BUILD)/%,$@) $(LLVM_BUILD_VARS) CXXFLAGS="-fno-omit-frame-pointer -fno-function-sections" ENABLE_PROFILING=1 ENABLE_OPTIMIZED=1 DISABLE_ASSERTIONS=1 $(LLVM_MAKE_ARGS)
-
-$(LLVM_SRC)/_patched: $(wildcard ./llvm_patches/*) $(wildcard ./clang_patches/*) $(LLVM_REVISION_FILE)
-	$(MAKE) llvm_up
 llvm_up:
-	python $(TOOLS_DIR)/git_svn_gotorev.py $(LLVM_SRC) $(LLVM_REVISION) ./llvm_patches
-	python $(TOOLS_DIR)/git_svn_gotorev.py $(LLVM_SRC)/tools/clang $(LLVM_REVISION) ./clang_patches
-	touch $(LLVM_SRC)/_patched
-
-# end of llvm rules
-########
+	$(CPYTHON) $(TOOLS_DIR)/git_svn_gotorev.py $(LLVM_SRC) $(LLVM_REVISION) ./llvm_patches
+	$(CPYTHON) $(TOOLS_DIR)/git_svn_gotorev.py $(LLVM_SRC)/tools/clang $(LLVM_REVISION) ./clang_patches
 
 ## TOOLS:
 
@@ -728,18 +498,6 @@ $(TOOLS_DIR)/publicize: $(TOOLS_DIR)/publicize.o $(LLVM_DEPS) $(BUILD_SYSTEM_DEP
 $(TOOLS_DIR)/publicize_release: $(TOOLS_DIR)/publicize.release.o $(LLVM_RELEASE_DEPS) $(BUILD_SYSTEM_DEPS)
 	$(ECHO) Linking $(TOOLS_DIR)/publicize_release
 	$(VERB) $(CXX) $< $(LDFLAGS_RELEASE) -o $@ -lLLVMBitWriter
-
-$(TOOLS_DIR)/astprint: $(TOOLS_DIR)/astprint.cpp $(BUILD_SYSTEM_DEPS) $(LLVM_DEPS) $(ASTPRINT_OBJS)
-	$(ECHO) Linking $(TOOLS_DIR)/astprint
-	$(VERB) $(CXX) $< -o $@ $(LLVM_LIB_DEPS) $(ASTPRINT_OBJS) $(LDFLAGS) $(STDLIB_SRCS:.cpp=.o) $(CXXFLAGS_DBG)
-
-.PHONY: astprint astcompare
-
-astprint: $(TOOLS_DIR)/astprint
-
-astcompare: astprint
-	$(ECHO) Running libpypa vs CPython AST result comparison test
-	$(TOOLS_DIR)/astprint_test.sh && echo "Success" || echo "Failure"
 
 ## END OF TOOLS
 
@@ -874,19 +632,21 @@ clang_check:
 
 cmake_check:
 	@cmake --version >/dev/null || (echo "cmake not available"; false)
-	@ninja --version >/dev/null || (echo "ninja not available"; false)
+	@$(NINJA) --version >/dev/null || (echo "ninja not available"; false)
+
+COMMON_CMAKE_OPTIONS := $(SRC_DIR) -DTEST_THREADS=$(TEST_THREADS) $(CMAKE_VALGRIND) -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -GNinja
 
 .PHONY: cmake_check clang_check
 $(CMAKE_SETUP_DBG):
 	@$(MAKE) cmake_check
 	@$(MAKE) clang_check
 	@mkdir -p $(CMAKE_DIR_DBG)
-	cd $(CMAKE_DIR_DBG); CC='clang' CXX='clang++' cmake -GNinja $(SRC_DIR) -DTEST_THREADS=$(TEST_THREADS) -DCMAKE_BUILD_TYPE=Debug $(CMAKE_VALGRIND)
+	cd $(CMAKE_DIR_DBG); CC='clang' CXX='clang++' cmake $(COMMON_CMAKE_OPTIONS) -DCMAKE_BUILD_TYPE=Debug
 $(CMAKE_SETUP_RELEASE):
 	@$(MAKE) cmake_check
 	@$(MAKE) clang_check
 	@mkdir -p $(CMAKE_DIR_RELEASE)
-	cd $(CMAKE_DIR_RELEASE); CC='clang' CXX='clang++' cmake -GNinja $(SRC_DIR) -DTEST_THREADS=$(TEST_THREADS) -DCMAKE_BUILD_TYPE=Release
+	cd $(CMAKE_DIR_RELEASE); CC='clang' CXX='clang++' cmake $(COMMON_CMAKE_OPTIONS) -DCMAKE_BUILD_TYPE=Release
 
 # Shared modules (ie extension modules that get built using pyston on setup.py) that we will ask CMake
 # to build.  You can flip this off to allow builds to continue even if self-hosting the sharedmods would fail.
@@ -894,30 +654,30 @@ CMAKE_SHAREDMODS := sharedmods ext_pyston
 
 .PHONY: pyston_dbg pyston_release
 pyston_dbg: $(CMAKE_SETUP_DBG)
-	$(NINJA) -C $(CMAKE_DIR_DBG) pyston copy_stdlib copy_libpyston $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
+	$(NINJA) -C $(CMAKE_DIR_DBG) pyston copy_stdlib $(CMAKE_SHAREDMODS) $(NINJAFLAGS)
 	ln -sf $(CMAKE_DIR_DBG)/pyston $@
 pyston_release: $(CMAKE_SETUP_RELEASE)
-	$(NINJA) -C $(CMAKE_DIR_RELEASE) pyston copy_stdlib copy_libpyston $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
+	$(NINJA) -C $(CMAKE_DIR_RELEASE) pyston copy_stdlib $(CMAKE_SHAREDMODS) $(NINJAFLAGS)
 	ln -sf $(CMAKE_DIR_RELEASE)/pyston $@
 
 CMAKE_SETUP_GCC := $(CMAKE_DIR_GCC)/build.ninja
 $(CMAKE_SETUP_GCC):
 	@$(MAKE) cmake_check
 	@mkdir -p $(CMAKE_DIR_GCC)
-	cd $(CMAKE_DIR_GCC); CC='$(GCC)' CXX='$(GPP)' cmake -GNinja $(SRC_DIR) -DCMAKE_BUILD_TYPE=Debug $(CMAKE_VALGRIND)
+	cd $(CMAKE_DIR_GCC); CC='$(GCC)' CXX='$(GPP)' cmake $(COMMON_CMAKE_OPTIONS) -DCMAKE_BUILD_TYPE=Debug
 .PHONY: pyston_gcc
 pyston_gcc: $(CMAKE_SETUP_GCC)
-	$(NINJA) -C $(CMAKE_DIR_GCC) pyston copy_stdlib copy_libpyston $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
+	$(NINJA) -C $(CMAKE_DIR_GCC) pyston copy_stdlib $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
 	ln -sf $(CMAKE_DIR_GCC)/pyston $@
 
 CMAKE_SETUP_RELEASE_GCC := $(CMAKE_DIR_RELEASE_GCC)/build.ninja
 $(CMAKE_SETUP_RELEASE_GCC):
 	@$(MAKE) cmake_check
 	@mkdir -p $(CMAKE_DIR_RELEASE_GCC)
-	cd $(CMAKE_DIR_RELEASE_GCC); CC='$(GCC)' CXX='$(GPP)' cmake -GNinja $(SRC_DIR) -DCMAKE_BUILD_TYPE=Release $(CMAKE_VALGRIND)
+	cd $(CMAKE_DIR_RELEASE_GCC); CC='$(GCC)' CXX='$(GPP)' cmake $(COMMON_CMAKE_OPTIONS)  -DCMAKE_BUILD_TYPE=Release
 .PHONY: pyston_release_gcc
 pyston_release_gcc: $(CMAKE_SETUP_RELEASE_GCC)
-	$(NINJA) -C $(CMAKE_DIR_RELEASE_GCC) pyston copy_stdlib copy_libpyston $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
+	$(NINJA) -C $(CMAKE_DIR_RELEASE_GCC) pyston copy_stdlib $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
 	ln -sf $(CMAKE_DIR_RELEASE_GCC)/pyston $@
 
 
@@ -926,21 +686,21 @@ CMAKE_SETUP_RELEASE_GCC_PGO := $(CMAKE_DIR_RELEASE_GCC_PGO)/build.ninja
 $(CMAKE_SETUP_RELEASE_GCC_PGO):
 	@$(MAKE) cmake_check
 	@mkdir -p $(CMAKE_DIR_RELEASE_GCC_PGO)
-	cd $(CMAKE_DIR_RELEASE_GCC_PGO); CC='$(GCC)' CXX='$(GPP)' cmake -GNinja $(SRC_DIR) -DCMAKE_BUILD_TYPE=Release $(CMAKE_VALGRIND) -DENABLE_PGO=ON -DPROFILE_STATE=use
+	cd $(CMAKE_DIR_RELEASE_GCC_PGO); CC='$(GCC)' CXX='$(GPP)' cmake $(COMMON_CMAKE_OPTIONS) -DCMAKE_BUILD_TYPE=Release -DENABLE_PGO=ON -DPROFILE_STATE=use
 .PHONY: pyston_release_gcc_pgo
 pyston_release_gcc_pgo: $(CMAKE_SETUP_RELEASE_GCC_PGO) $(CMAKE_DIR_RELEASE_GCC_PGO)/.trained
-	$(NINJA) -C $(CMAKE_DIR_RELEASE_GCC_PGO) pyston copy_stdlib copy_libpyston $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
+	$(NINJA) -C $(CMAKE_DIR_RELEASE_GCC_PGO) pyston copy_stdlib $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
 	ln -sf $(CMAKE_DIR_RELEASE_GCC_PGO)/pyston $@
 
 CMAKE_SETUP_RELEASE_GCC_PGO_INSTRUMENTED := $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED)/build.ninja
 $(CMAKE_SETUP_RELEASE_GCC_PGO_INSTRUMENTED):
 	@$(MAKE) cmake_check
 	@mkdir -p $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED)
-	cd $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED); CC='$(GCC)' CXX='$(GPP)' cmake -GNinja $(SRC_DIR) -DCMAKE_BUILD_TYPE=Release $(CMAKE_VALGRIND) -DENABLE_PGO=ON -DPROFILE_STATE=generate -DPROFILE_DIR=$(CMAKE_DIR_RELEASE_GCC_PGO)
+	cd $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED); CC='$(GCC)' CXX='$(GPP)' cmake $(COMMON_CMAKE_OPTIONS) -DCMAKE_BUILD_TYPE=Release -DENABLE_PGO=ON -DPROFILE_STATE=generate -DPROFILE_DIR=$(CMAKE_DIR_RELEASE_GCC_PGO)
 
 .PHONY: pyston_release_gcc_pgo_instrumented
 pyston_release_gcc_pgo_instrumented: $(CMAKE_SETUP_RELEASE_GCC_PGO_INSTRUMENTED)
-	$(NINJA) -C $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED) -f $(CMAKE_SETUP_RELEASE_GCC_PGO_INSTRUMENTED) pyston copy_stdlib copy_libpyston $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
+	$(NINJA) -C $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED) pyston copy_stdlib $(CMAKE_SHAREDMODS) ext_cpython $(NINJAFLAGS)
 	ln -sf $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED)/pyston $@
 
 PROFILE_TARGET := ./pyston $(SRC_DIR)/minibenchmarks/combined.py
@@ -948,6 +708,7 @@ PROFILE_TARGET := ./pyston $(SRC_DIR)/minibenchmarks/combined.py
 $(CMAKE_DIR_RELEASE_GCC_PGO)/.trained: pyston_release_gcc_pgo_instrumented
 	@echo "Training pgo"
 	mkdir -p $(CMAKE_DIR_RELEASE_GCC_PGO)
+	rm -rf $(CMAKE_DIR_RELEASE_GCC_PGO)/from_cpython/{Lib,Modules,Objects,Python,Parser} $(CMAKE_DIR_RELEASE_GCC_PGO)/src
 	(cd $(CMAKE_DIR_RELEASE_GCC_PGO_INSTRUMENTED) && $(PROFILE_TARGET) && $(PROFILE_TARGET) ) && touch $(CMAKE_DIR_RELEASE_GCC_PGO)/.trained
 
 pyston_pgo: pyston_release_gcc_pgo
@@ -964,7 +725,7 @@ check_format: $(CMAKE_SETUP_RELEASE)
 .PHONY: clean
 clean:
 	@ find src $(TOOLS_DIR) $(TEST_DIR) ./from_cpython ./lib_pyston \( -name '*.o' -o -name '*.d' -o -name '*.py_cache' -o -name '*.bc' -o -name '*.o.ll' -o -name '*.pub.ll' -o -name '*.cache' -o -name 'stdlib*.ll' -o -name '*.pyc' -o -name '*.so' -o -name '*.a' -o -name '*.expected_cache' -o -name '*.pch' \) -print -delete
-	@ find \( -name 'pyston*' -executable -type f \) -print -delete
+	@ find $(BUILD_DIR) \( -name 'pyston*' -executable -type f \) -print -delete
 	@ rm -vf pyston_dbg pyston_release pyston_gcc
 	@ find $(TOOLS_DIR) -maxdepth 0 -executable -type f -print -delete
 	@ rm -rf oprofile_data
@@ -998,23 +759,23 @@ define make_target
 $(eval \
 .PHONY: test$1 check$1
 check$1 test$1: $(PYTHON_EXE_DEPS) pyston$1
-	$(PYTHON) $(TOOLS_DIR)/tester.py -R pyston$1 -j$(TEST_THREADS) -a=-S -k $(TESTS_DIR) $(ARGS)
+	$(PYTHON) $(TOOLS_DIR)/tester.py -q -R pyston$1 -j$(TEST_THREADS) -a=-S -k $(TESTS_DIR) $(ARGS)
 	@# we pass -I to cpython tests and skip failing ones because they are sloooow otherwise
-	$(PYTHON) $(TOOLS_DIR)/tester.py -R pyston$1 -j$(TEST_THREADS) -a=-S -k --exit-code-only --skip-failing -t50 $(TEST_DIR)/cpython $(ARGS)
-	$(PYTHON) $(TOOLS_DIR)/tester.py -R pyston$1 -j$(TEST_THREADS) -k -a=-S --exit-code-only --skip-failing -t600 $(TEST_DIR)/integration $(ARGS)
-	$(PYTHON) $(TOOLS_DIR)/tester.py -a=-x -R pyston$1 -j$(TEST_THREADS) -a=-n -a=-S -k $(TESTS_DIR) $(ARGS)
-	$(PYTHON) $(TOOLS_DIR)/tester.py -R pyston$1 -j$(TEST_THREADS) -a=-O -a=-S -k $(TESTS_DIR) $(ARGS)
+	$(PYTHON) $(TOOLS_DIR)/tester.py -q -R pyston$1 -j$(TEST_THREADS) -a=-S -k --exit-code-only --skip-failing -t50 $(TEST_DIR)/cpython $(ARGS)
+	$(PYTHON) $(TOOLS_DIR)/tester.py -q -R pyston$1 -j$(TEST_THREADS) -k -a=-S --exit-code-only --skip-failing -t600 $(TEST_DIR)/integration $(ARGS)
+	$(PYTHON) $(TOOLS_DIR)/tester.py -q -R pyston$1 -j$(TEST_THREADS) -a=-n -a=-S -t50 -k $(TESTS_DIR) $(ARGS)
+	$(PYTHON) $(TOOLS_DIR)/tester.py -q -R pyston$1 -j$(TEST_THREADS) -a=-L -a=-S -k $(TESTS_DIR) $(ARGS)
 
 .PHONY: run$1 dbg$1
 run$1: pyston$1 $$(RUN_DEPS)
 	PYTHONPATH=test/test_extension:$${PYTHONPATH} ./pyston$1 $$(ARGS)
 dbg$1: pyston$1 $$(RUN_DEPS)
-	PYTHONPATH=test/test_extension:$${PYTHONPATH} zsh -c 'ulimit -m $$(MAX_DBG_MEM_KB); $$(GDB) $$(GDB_CMDS) --args ./pyston$1 $$(ARGS)'
+	PYTHONPATH=test/test_extension:$${PYTHONPATH} zsh -c 'ulimit -v $$(MAX_DBG_MEM_KB); $$(GDB) $$(GDB_CMDS) --args ./pyston$1 $$(ARGS)'
 nosearch_run$1_%: %.py pyston$1 $$(RUN_DEPS)
-	$(VERB) PYTHONPATH=test/test_extension:$${PYTHONPATH} zsh -c 'ulimit -m $$(MAX_MEM_KB); time ./pyston$1 $$(ARGS) $$<'
+	$(VERB) PYTHONPATH=test/test_extension:$${PYTHONPATH} zsh -c 'ulimit -v $$(MAX_MEM_KB); time ./pyston$1 $$(ARGS) $$<'
 $$(call make_search,run$1_%)
 nosearch_dbg$1_%: %.py pyston$1 $$(RUN_DEPS)
-	$(VERB) PYTHONPATH=test/test_extension:$${PYTHONPATH} zsh -c 'ulimit -m $$(MAX_DBG_MEM_KB); $$(GDB) $$(GDB_CMDS) --args ./pyston$1 $$(ARGS) $$<'
+	$(VERB) PYTHONPATH=test/test_extension:$${PYTHONPATH} zsh -c 'ulimit -v $$(MAX_DBG_MEM_KB); $$(GDB) $$(GDB_CMDS) --args ./pyston$1 $$(ARGS) $$<'
 $$(call make_search,dbg$1_%)
 
 ifneq ($$(ENABLE_VALGRIND),0)
@@ -1044,10 +805,11 @@ endef
 
 .PHONY: perf_report
 perf_report:
-	perf report -n
+	perf report -n --objdump=tools/perf_jit.py
 
 .PHONY: run run_% dbg_% debug_% perf_%
 run: run_dbg
+dbg: dbg_dbg
 run_%: run_dbg_%
 	@true
 dbg_%: dbg_dbg_%
@@ -1080,9 +842,12 @@ nosearch_check_%: %.py pyston_dbg check-deps
 $(call make_search,check_%)
 
 nosearch_dbgpy_% nosearch_pydbg_%: %.py ext_pythondbg
-	export PYTHON_VERSION=$$(python2.7-dbg -V 2>&1 | awk '{print $$2}'); PYTHONPATH=test/test_extension/build/lib.linux-x86_64-2.7-pydebug $(GDB) --ex "dir $(DEPS_DIR)/python-src/python2.7-$$PYTHON_VERSION/debian" $(GDB_CMDS) --args python2.7-dbg $<
+	export PYTHON_VERSION=$$(python2.7-dbg -V 2>&1 | awk '{print $$2}'); PYTHONPATH=test/test_extension/build/lib.linux-x86_64-2.7-pydebug $(GDB) --ex "dir $(DEPS_DIR)/python-src/python2.7-$$PYTHON_VERSION/debian" $(GDB_CMDS) --args python2.7-dbg $(ARGS) $<
 $(call make_search,dbgpy_%)
 $(call make_search,pydbg_%)
+
+pydbg: ext_pythondbg
+	export PYTHON_VERSION=$$(python2.7-dbg -V 2>&1 | awk '{print $$2}'); PYTHONPATH=test/test_extension/build/lib.linux-x86_64-2.7-pydebug $(GDB) --ex "dir $(DEPS_DIR)/python-src/python2.7-$$PYTHON_VERSION/debian" $(GDB_CMDS) --args python2.7-dbg
 
 # "kill valgrind":
 kv:
@@ -1140,11 +905,11 @@ opreportcg:
 
 .PHONY: watch_% watch wdbg_%
 watch_%:
-	@ ( ulimit -t 60; ulimit -m $(MAK_MEM_KB); \
+	@ ( ulimit -t 60; ulimit -v $(MAK_MEM_KB); \
 		TARGET=$(dir $@)$(patsubst watch_%,%,$(notdir $@)); \
 		clear; $(MAKE) $$TARGET $(WATCH_ARGS); true; \
 		while inotifywait -q -e modify -e attrib -e move -e move_self -e create -e delete -e delete_self \
-		Makefile $$(find src test \( -name '*.cpp' -o -name '*.h' -o -name '*.py' \) ); do clear; \
+		Makefile $$(find src test plugins \( -name '*.cpp' -o -name '*.h' -o -name '*.py' \) ); do clear; \
 			$(MAKE) $$TARGET $(WATCH_ARGS); \
 		done )
 		# Makefile $$(find \( -name '*.cpp' -o -name '*.h' -o -name '*.py' \) -o -type d ); do clear; $(MAKE) $(patsubst watch_%,%,$@); done )
@@ -1156,9 +921,10 @@ wdbg_%:
 	$(MAKE) $(patsubst wdbg_%,watch_dbg_%,$@) GDB_POST_CMDS="--ex quit"
 
 .PHONY: head_%
-HEAD := 40
+HEAD ?= 40
+HEAD_SKIP := 6
 head_%:
-	@ bash -c "set -o pipefail; script -e -q -c '$(MAKE) $(dir $@)$(patsubst head_%,%,$(notdir $@))' /dev/null | head -n$(HEAD)"
+	@ bash -c "set -o pipefail; script -e -q -c '$(MAKE) $(dir $@)$(patsubst head_%,%,$(notdir $@))' /dev/null | tail -n+$(HEAD_SKIP) | head -n$(HEAD)"
 head: head_pyston_dbg
 .PHONY: hwatch_%
 hwatch_%:
@@ -1181,20 +947,20 @@ test_cpp_dwarf:
 	objdump -W test_asm | less
 	rm test_asm
 test_cpp_ll:
-	$(CLANGPP_EXE) $(TEST_DIR)/test.cpp -o test.ll -c -O3 -emit-llvm -S -std=c++11 -g
+	$(CLANGPP_EXE) $(TEST_DIR)/test.cpp -o test.ll -c -O3 -emit-llvm -S -std=c++11
 	less test.ll
 	rm test.ll
 .PHONY: bench_exceptions
 bench_exceptions:
 	$(CLANGPP_EXE) $(TEST_DIR)/bench_exceptions.cpp -o bench_exceptions -O3 -std=c++11
-	zsh -c 'ulimit -m $(MAX_MEM_KB); time ./bench_exceptions'
+	zsh -c 'ulimit -v $(MAX_MEM_KB); time ./bench_exceptions'
 	rm bench_exceptions
 
-TEST_EXT_MODULE_NAMES := basic_test descr_test slots_test
+TEST_EXT_MODULE_NAMES := basic_test descr_test slots_test type_test api_test
 TEST_EXT_MODULE_SRCS := $(TEST_EXT_MODULE_NAMES:%=test/test_extension/%.c)
 TEST_EXT_MODULE_OBJS := $(TEST_EXT_MODULE_NAMES:%=test/test_extension/%.pyston.so)
 
-SHAREDMODS_NAMES := _multiprocessing pyexpat
+SHAREDMODS_NAMES := _multiprocessing pyexpat future_builtins
 SHAREDMODS_SRCS := \
 	_multiprocessing/multiprocessing.c \
 	_multiprocessing/semaphore.c \
@@ -1205,7 +971,8 @@ SHAREDMODS_SRCS := \
 	expat/xmltok_impl.c \
 	expat/xmltok_ns.c \
  	pyexpat.c \
- 	_elementtree.c
+	_elementtree.c\
+	future_builtins.c
 SHAREDMODS_SRCS := $(SHAREDMODS_SRCS:%=from_cpython/Modules/%)
 SHAREDMODS_OBJS := $(SHAREDMODS_NAMES:%=lib_pyston/%.pyston.so)
 
@@ -1229,7 +996,7 @@ endif
 # depend on the first one.
 $(firstword $(TEST_EXT_MODULE_OBJS)): $(TEST_EXT_MODULE_SRCS) | $(BUILD_PY)
 	$(VERB) cd $(TEST_DIR)/test_extension; time ../../$(BUILD_PY) setup.py build
-	$(VERB) cd $(TEST_DIR)/test_extension; ln -sf $(TEST_EXT_MODULE_NAMES:%=build/lib.linux2-2.7/%.pyston.so) .
+	$(VERB) cd $(TEST_DIR)/test_extension; ln -sf $(TEST_EXT_MODULE_NAMES:%=build/lib.linux-x86_64-2.7/%.pyston.so) .
 	$(VERB) touch -c $(TEST_EXT_MODULE_OBJS)
 $(wordlist 2,9999,$(TEST_EXT_MODULE_OBJS)): $(firstword $(TEST_EXT_MODULE_OBJS))
 $(firstword $(SHAREDMODS_OBJS)): $(SHAREDMODS_SRCS) | $(BUILD_PY)
@@ -1259,27 +1026,69 @@ $(FROM_CPYTHON_SRCS:.c=.prof.o): %.prof.o: %.c $(BUILD_SYSTEM_DEPS)
 	$(ECHO) Compiling C file to $@
 	$(VERB) $(CC_PROFILE) $(EXT_CFLAGS_PROFILE) -c $< -o $@ -g -MMD -MP -MF $(patsubst %.o,%.d,$@)
 
+.PHONY: update_section_ordering
+update_section_ordering: pyston_release
+	perf record -o perf_section_ordering.data -- ./pyston_release -q minibenchmarks/combined.py
+	perf record -o perf_section_ordering.data -- ./pyston_release -q minibenchmarks/combined.py
+	$(MAKE) pyston_pgo
+	python tools/generate_section_ordering_from_pgo_build.py pyston_pgo perf_section_ordering.data > section_ordering.txt
+	rm perf_section_ordering.data
 
 
 
 # TESTING:
 
-_plugins/clang_capi.so: plugins/clang_capi.cpp $(BUILD_SYSTEM_DEPS)
-	@# $(CXX) $< -o $@ -c -I/usr/lib/llvm-3.5/include -std=c++11 -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS
-	$(CXX) $< -o $@ -std=c++11 $(LLVM_CXXFLAGS) -I$(LLVM_SRC)/tools/clang/include -I$(LLVM_BUILD)/tools/clang/include -shared
+PLUGINS := $(wildcard plugins/*.cpp)
+$(patsubst %.cpp,%.o,$(PLUGINS)): plugins/%.o: plugins/%.cpp $(BUILD_SYSTEM_DEPS)
+	ninja -C $(CMAKE_DIR_DBG) llvm/bin/llvm-config clangASTMatchers clangTooling LLVMLTO LLVMDebugInfoPDB LLVMLineEditor LLVMInterpreter LLVMOrcJIT llvm/bin/clang
+	$(CMAKE_DIR_DBG)/llvm/bin/clang $< -o $@ -std=c++11 $(shell $(LLVM_BIN_DBG)/llvm-config --cxxflags) -fno-rtti -O0 -I$(LLVM_SRC)/tools/clang/include -I$(LLVM_INC_DBG)/tools/clang/include -c
 
-plugins/clang_capi.o: plugins/clang_capi.cpp $(BUILD_SYSTEM_DEPS)
-	@# $(CXX) $< -o $@ -c -I/usr/lib/llvm-3.5/include -std=c++11 -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS
-	$(CXX) $< -o $@ -std=c++11 $(LLVM_CXXFLAGS) -O0 -I$(LLVM_SRC)/tools/clang/include -I$(LLVM_BUILD)/tools/clang/include -c
-plugins/clang_capi: plugins/clang_capi.o $(BUILD_SYSTEM_DEPS)
-	@# $(CXX) $< -o $@ -c -I/usr/lib/llvm-3.5/include -std=c++11 -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS
-	$(CXX) $< -o $@ -L$(LLVM_BUILD)/Release/lib -lclangASTMatchers -lclangRewrite -lclangFrontend -lclangDriver -lclangTooling -lclangParse -lclangSema -lclangAnalysis -lclangAST -lclangEdit -lclangLex -lclangBasic -lclangSerialization $(shell $(LLVM_BUILD)/Release+Asserts/bin/llvm-config --ldflags --system-libs --libs all)
-plugins/clang_capi.so: plugins/clang_capi.o $(BUILD_SYSTEM_DEPS)
-	@# $(CXX) $< -o $@ -c -I/usr/lib/llvm-3.5/include -std=c++11 -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS
-	$(CXX) $< -o $@ -shared
-.PHONY: plugin_test
-plugin_test: plugins/clang_capi.so
-	$(CLANG_CXX) -Xclang -load -Xclang plugins/clang_capi.so -Xclang -add-plugin -Xclang print-fns test/test.cpp -c -S -o -
+$(patsubst %.cpp,%.so,$(PLUGINS)): plugins/%.so: plugins/%.o
+	$(CMAKE_DIR_DBG)/llvm/bin/clang $< -o $@ -shared -lclangASTMatchers -lclangTooling $(shell $(LLVM_BIN_DBG)/llvm-config --ldflags)
+	# $(CXX) $< -o $@ -lclangASTMatchers -lclangRewrite -lclangFrontend -lclangDriver -lclangTooling -lclangParse -lclangSema -lclangAnalysis -lclangAST -lclangEdit -lclangLex -lclangBasic -lclangSerialization $(shell $(LLVM_BIN_DBG)/llvm-config --ldflags --system-libs --libs all)
+
+$(patsubst %.cpp,%,$(PLUGINS)): plugins/%: plugins/%.o $(BUILD_SYSTEM_DEPS)
+	$(CXX) $< -o $@ -lclangASTMatchers -lclangRewrite -lclangFrontend -lclangDriver -lclangTooling -lclangParse -lclangSema -lclangAnalysis -lclangAST -lclangEdit -lclangLex -lclangBasic -lclangSerialization $(shell $(LLVM_BIN_DBG)/llvm-config --ldflags --system-libs --libs all)
+
 .PHONY: tool_test
-tool_test: plugins/clang_capi
-	plugins/clang_capi test/test.cpp --
+tool_test: plugins/clang_linter.o
+	plugins/clang_linter test/test.cpp -- $(shell $(LLVM_BIN_DBG)/llvm-config --cxxflags) -I/usr/lib/llvm-3.5/include
+
+.PHONY: superlint
+superlint: plugins/clang_linter.so
+	for fn in $(MAIN_SRCS); do $(CLANG_CXX) -Xclang -load -Xclang plugins/clang_linter.so -Xclang -plugin -Xclang pyston-linter $$fn -c -Isrc/ -Ifrom_cpython/Include -Ibuild/Debug/from_cpython/Include $(shell $(LLVM_BIN_DBG)/llvm-config --cxxflags) -no-pedantic -Wno-unused-variable -DNVALGRIND -Wno-invalid-offsetof -Wno-mismatched-tags -Wno-unused-function -Wno-unused-private-field -Wno-sign-compare || break; done
+
+.PHONY: lint_%
+lint_%: %.cpp plugins/clang_linter.so
+	$(ECHO) Linting $<
+	$(VERB) $(CLANG_CXX) -Xclang -load -Xclang plugins/clang_linter.so -Xclang -plugin -Xclang pyston-linter src/runtime/float.cpp $< -c -Isrc/ -Ifrom_cpython/Include -Ibuild/Debug/from_cpython/Include $(shell $(LLVM_BIN_DBG)/llvm-config --cxxflags) $(COMMON_CXXFLAGS) -no-pedantic -Wno-unused-variable -DNVALGRIND -Wno-invalid-offsetof -Wno-mismatched-tags -Wno-unused-function -Wno-unused-private-field -Wno-sign-compare -DLLVMREV=$(LLVM_REVISION) -Ibuild_deps/lz4/lib -DBINARY_SUFFIX= -DBINARY_STRIPPED_SUFFIX=_stripped -Ibuild/Debug/libunwind/include -Wno-extern-c-compat -Wno-unused-local-typedef -Wno-inconsistent-missing-override
+
+REFCOUNT_CHECKER_BUILD_PATH := $(CMAKE_DIR_DBG)/plugins/refcount_checker/llvm/bin/refcount_checker
+REFCOUNT_CHECKER_RUN_PATH := $(CMAKE_DIR_DBG)/llvm/bin/refcount_checker
+$(REFCOUNT_CHECKER_RUN_PATH): refcount_checker
+
+.PHONY: refcount_checker
+refcount_checker:
+	$(NINJA) -C $(CMAKE_DIR_DBG) refcount_checker copy_stdlib $(NINJAFLAGS)
+	cp $(REFCOUNT_CHECKER_BUILD_PATH) $(REFCOUNT_CHECKER_RUN_PATH)
+
+.PHONY: refcheck_%
+refcheck_%: %.cpp refcount_checker
+	cd $(CMAKE_DIR_DBG); $(REFCOUNT_CHECKER_RUN_PATH) ../../$<
+.PHONY: dbg_refcheck_%
+dbg_refcheck_%: %.cpp refcount_checker
+	cd $(CMAKE_DIR_DBG); $(GDB) --ex run --ex "bt 20" --args $(REFCOUNT_CHECKER_RUN_PATH) ../../$<
+
+
+.PHONY: clang_lint
+clang_lint: $(foreach FN,$(MAIN_SRCS),$(dir $(FN))lint_$(notdir $(FN:.cpp=)))
+
+# 'make package' will build a package using the pgo build, since that's the
+# configuration with the best performance.  Testing that is a pain since it
+# requires rerunning the pgo build, so there's also 'make package_nonpgo' mostly
+# for testing.
+package: pyston_pgo
+	$(NINJA) -C $(CMAKE_DIR_RELEASE_GCC_PGO) package
+
+package_nonpgo: pyston_release
+	$(NINJA) -C $(CMAKE_DIR_RELEASE) package

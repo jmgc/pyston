@@ -10,14 +10,18 @@ extern "C" {
 
 typedef struct {
     PyObject_HEAD
-    PyObject *dict;
+    // Pyston change: changed from dict to hcattrs
+    // PyObject *dict;
+    struct _hcattrs hcattrs;
     PyObject *args;
     PyObject *message;
 } PyBaseExceptionObject;
 
 typedef struct {
     PyObject_HEAD
-    PyObject *dict;
+    // Pyston change: changed from dict to hcattrs
+    // PyObject *dict;
+    struct _hcattrs hcattrs;
     PyObject *args;
     PyObject *message;
     PyObject *msg;
@@ -31,7 +35,9 @@ typedef struct {
 #ifdef Py_USING_UNICODE
 typedef struct {
     PyObject_HEAD
-    PyObject *dict;
+    // Pyston change: changed from dict to hcattrs
+    // PyObject *dict;
+    struct _hcattrs hcattrs;
     PyObject *args;
     PyObject *message;
     PyObject *encoding;
@@ -44,7 +50,9 @@ typedef struct {
 
 typedef struct {
     PyObject_HEAD
-    PyObject *dict;
+    // Pyston change: changed from dict to hcattrs
+    // PyObject *dict;
+    struct _hcattrs hcattrs;
     PyObject *args;
     PyObject *message;
     PyObject *code;
@@ -52,7 +60,9 @@ typedef struct {
 
 typedef struct {
     PyObject_HEAD
-    PyObject *dict;
+    // Pyston change: changed from dict to hcattrs
+    // PyObject *dict;
+    struct _hcattrs hcattrs;
     PyObject *args;
     PyObject *message;
     PyObject *myerrno;
@@ -63,7 +73,9 @@ typedef struct {
 #ifdef MS_WINDOWS
 typedef struct {
     PyObject_HEAD
-    PyObject *dict;
+    // Pyston change: changed from dict to hcattrs
+    // PyObject *dict;
+    struct _hcattrs hcattrs;
     PyObject *args;
     PyObject *message;
     PyObject *myerrno;
@@ -78,10 +90,10 @@ typedef struct {
 PyAPI_FUNC(void) PyErr_SetNone(PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) PyErr_SetObject(PyObject *, PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) PyErr_SetString(PyObject *, const char *) PYSTON_NOEXCEPT;
-PyAPI_FUNC(PyObject *) PyErr_Occurred(void) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject *)) PyErr_Occurred(void) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) PyErr_Clear(void) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) PyErr_Fetch(PyObject **, PyObject **, PyObject **) PYSTON_NOEXCEPT;
-PyAPI_FUNC(void) PyErr_Restore(PyObject *, PyObject *, PyObject *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(void) PyErr_Restore(STOLEN(PyObject *), STOLEN(PyObject *), STOLEN(PyObject *)) PYSTON_NOEXCEPT;
 
 // Pyton change: This functions are normally only available in CPython >= 3.3 and PyPy but Cython can use them.
 PyAPI_FUNC(void) PyErr_GetExcInfo(PyObject **ptype, PyObject **pvalue, PyObject **ptraceback) PYSTON_NOEXCEPT;
@@ -100,16 +112,16 @@ PyAPI_FUNC(void) PyErr_NormalizeException(PyObject**, PyObject**, PyObject**) PY
 
 /* */
 
-// Pyston change: made these function calls for now
-#if 0
 #define PyExceptionClass_Check(x)                                       \
     (PyClass_Check((x)) || (PyType_Check((x)) &&                        \
       PyType_FastSubclass((PyTypeObject*)(x), Py_TPFLAGS_BASE_EXC_SUBCLASS)))
 
 #define PyExceptionInstance_Check(x)                    \
     (PyInstance_Check((x)) ||                           \
-     PyType_FastSubclass((x)->ob_type, Py_TPFLAGS_BASE_EXC_SUBCLASS))
+     PyType_FastSubclass(Py_TYPE(x), Py_TPFLAGS_BASE_EXC_SUBCLASS))
 
+// Pyston change: made these function calls for now
+#if 0
 #define PyExceptionClass_Name(x)                                   \
     (PyClass_Check((x))                                            \
      ? PyString_AS_STRING(((PyClassObject*)(x))->cl_name)          \
@@ -121,8 +133,6 @@ PyAPI_FUNC(void) PyErr_NormalizeException(PyObject**, PyObject**, PyObject**) PY
       : (PyObject*)((x)->ob_type)))
 #endif
 // (We might have to make these wrapper macros that do appropriate casting to PyObject)
-PyAPI_FUNC(int) PyExceptionClass_Check(PyObject*) PYSTON_NOEXCEPT;
-PyAPI_FUNC(int) PyExceptionInstance_Check(PyObject*) PYSTON_NOEXCEPT;
 PyAPI_FUNC(const char*) PyExceptionClass_Name(PyObject*) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject*) PyExceptionInstance_Class(PyObject*) PYSTON_NOEXCEPT;
 
@@ -209,7 +219,8 @@ PyAPI_FUNC(PyObject *) PyErr_SetFromErrnoWithUnicodeFilename(
     PyObject *, const Py_UNICODE *) PYSTON_NOEXCEPT;
 #endif /* MS_WINDOWS */
 
-PyAPI_FUNC(PyObject *) PyErr_Format(PyObject *, const char *, ...)
+// This actually always returns NULL:
+PyAPI_FUNC(BORROWED(PyObject *)) PyErr_Format(PyObject *, const char *, ...)
                         PYSTON_NOEXCEPT Py_GCC_ATTRIBUTE((format(printf, 2, 3)));
 
 #ifdef MS_WINDOWS
@@ -239,10 +250,18 @@ PyAPI_FUNC(void) _PyErr_BadInternalCall(const char *filename, int lineno) PYSTON
 
 /* Function to create a new exception */
 PyAPI_FUNC(PyObject *) PyErr_NewException(
-    char *name, PyObject *base, PyObject *dict) PYSTON_NOEXCEPT;
+    const char *name, PyObject *base, PyObject *dict) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyErr_NewExceptionWithDoc(
     char *name, char *doc, PyObject *base, PyObject *dict) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) PyErr_WriteUnraisable(PyObject *) PYSTON_NOEXCEPT;
+
+// Pyston addition: allocate + initialize an instance of type `type`.
+// arg represents the single value that will be passed to the constructor;
+// a NULL value represents passing zero arguments, and a tuple value will
+// not be expanded into multiple arguments.
+// In the common cases this will be faster than creating the instance using
+// PyObject_Call(type, PyTuple_Pack(1, arg), NULL)
+PyAPI_FUNC(PyObject *) PyErr_CreateExceptionInstance(PyObject* type, PyObject* arg) PYSTON_NOEXCEPT;
 
 /* In sigcheck.c or signalmodule.c */
 PyAPI_FUNC(int) PyErr_CheckSignals(void) PYSTON_NOEXCEPT;

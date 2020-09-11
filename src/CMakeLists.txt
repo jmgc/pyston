@@ -1,14 +1,13 @@
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
-set(CMAKE_CXX_FLAGS_DEBUG "-g -DBINARY_SUFFIX= -DBINARY_STRIPPED_SUFFIX=_stripped")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fstrict-aliasing -enable-tbaa -DNVALGRIND -DBINARY_SUFFIX=_release -DBINARY_STRIPPED_SUFFIX=")
+set(CMAKE_CXX_FLAGS_DEBUG "-g -DBINARY_SUFFIX= -DBINARY_STRIPPED_SUFFIX=_stripped -DPy_BUILD_CORE -D_PYSTON_API")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fstrict-aliasing -enable-tbaa -DNVALGRIND -DBINARY_SUFFIX=_release -DBINARY_STRIPPED_SUFFIX= -DPy_BUILD_CORE -D_PYSTON_API")
 
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} OUTPUT_VARIABLE GITREV OUTPUT_STRIP_TRAILING_WHITESPACE)
 set_source_files_properties(jit.cpp PROPERTIES COMPILE_DEFINITIONS "GITREV=${GITREV}")
 
 include_directories(${CMAKE_BINARY_DIR})
-include_directories(${CMAKE_BINARY_DIR}/libunwind/include)
-include_directories(${CMAKE_SOURCE_DIR}/libpypa/src)
-include_directories(${CMAKE_SOURCE_DIR}/lz4/lib)
+include_directories(${CMAKE_BINARY_DIR}/build_deps/libunwind/include)
+include_directories(${CMAKE_SOURCE_DIR}/build_deps/lz4/lib)
 
 if(ENABLE_GPERFTOOLS)
   set(OPTIONAL_SRCS ${OPTIONAL_SRCS} codegen/profiling/pprof.cpp)
@@ -38,12 +37,14 @@ add_library(PYSTON_OBJECTS OBJECT ${OPTIONAL_SRCS}
 		codegen/baseline_jit.cpp
 		codegen/codegen.cpp
 		codegen/compvars.cpp
+		codegen/cpython_ast.cpp
 		codegen/entry.cpp
 		codegen/gcbuilder.cpp
 		codegen/irgen.cpp
 		codegen/irgen/future.cpp
 		codegen/irgen/hooks.cpp
 		codegen/irgen/irgenerator.cpp
+		codegen/irgen/refcounts.cpp
 		codegen/irgen/util.cpp
 		codegen/memmgr.cpp
 		codegen/opt/aa.cpp
@@ -58,13 +59,13 @@ add_library(PYSTON_OBJECTS OBJECT ${OPTIONAL_SRCS}
 		codegen/patchpoints.cpp
 		codegen/profiling/dumprof.cpp
 		codegen/profiling/profiling.cpp
-		codegen/pypa-parser.cpp
 		codegen/runtime_hooks.cpp
 		codegen/serialize_ast.cpp
 		codegen/stackmaps.cpp
 		codegen/type_recording.cpp
 		codegen/unwinding.cpp
 		core/ast.cpp
+		core/bst.cpp
 		core/cfg.cpp
 		core/options.cpp
 		core/stats.cpp
@@ -72,13 +73,8 @@ add_library(PYSTON_OBJECTS OBJECT ${OPTIONAL_SRCS}
 		core/threading.cpp
 		core/util.cpp
 		deadlock_debug_helper.cpp
-		gc/collector.cpp
-		gc/gc_alloc.cpp
-		gc/heap.cpp
 		runtime/bool.cpp
-		runtime/builtin_modules/ast.cpp
 		runtime/builtin_modules/builtins.cpp
-		runtime/builtin_modules/gc.cpp
 		runtime/builtin_modules/pyston.cpp
 		runtime/builtin_modules/sys.cpp
 		runtime/builtin_modules/thread.cpp
@@ -90,10 +86,11 @@ add_library(PYSTON_OBJECTS OBJECT ${OPTIONAL_SRCS}
 		runtime/cxx_unwind.cpp
 		runtime/descr.cpp
 		runtime/dict.cpp
-		runtime/file.cpp
+		runtime/exceptions.cpp
 		runtime/float.cpp
 		runtime/frame.cpp
 		runtime/generator.cpp
+		runtime/hiddenclass.cpp
 		runtime/ics.cpp
 		runtime/import.cpp
 		runtime/int.cpp
@@ -103,19 +100,18 @@ add_library(PYSTON_OBJECTS OBJECT ${OPTIONAL_SRCS}
 		runtime/long.cpp
 		runtime/objmodel.cpp
 		runtime/set.cpp
-		runtime/stacktrace.cpp
 		runtime/str.cpp
+		runtime/str_interning.cpp
 		runtime/super.cpp
-		runtime/traceback.cpp
 		runtime/tuple.cpp
 		runtime/types.cpp
 		runtime/util.cpp
 		)
 
-add_dependencies(PYSTON_OBJECTS copy_stdlib libunwind_patched libunwind pypa ${LLVM_LIBS})
+add_dependencies(PYSTON_OBJECTS copy_stdlib libunwind_patched libunwind ${LLVM_LIBS})
 
 add_library(PYSTON_MAIN_OBJECT OBJECT jit.cpp)
-add_dependencies(PYSTON_MAIN_OBJECT copy_stdlib libunwind_patched libunwind pypa liblz4 ${LLVM_LIBS})
+add_dependencies(PYSTON_MAIN_OBJECT copy_stdlib libunwind_patched libunwind liblz4 ${LLVM_LIBS})
 
 # build stdlib
 add_subdirectory(runtime/inline)

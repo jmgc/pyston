@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,8 +26,6 @@ class RTDyldMemoryManager;
 namespace pyston {
 
 std::unique_ptr<llvm::RTDyldMemoryManager> createMemoryManager();
-void registerEHFrames(uint8_t* addr, uint64_t load_addr, size_t size);
-void deregisterEHFrames(uint8_t* addr, uint64_t load_addr, size_t size);
 }
 
 #endif

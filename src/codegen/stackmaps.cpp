@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,14 +34,14 @@ namespace pyston {
 // TODO shouldn't be recording this in a global variable
 static uint64_t stackmap_address = 0;
 
-StackMap* parseStackMap() {
+std::unique_ptr<StackMap> parseStackMap() {
     if (!stackmap_address)
         return NULL;
 
     if (VERBOSITY() >= 3)
         printf("Found the stackmaps at stackmap_address 0x%lx\n", stackmap_address);
 
-    StackMap* cur_map = new StackMap();
+    std::unique_ptr<StackMap> cur_map = std::unique_ptr<StackMap>(new StackMap());
 
     union {
         const int8_t* i8;
@@ -70,6 +70,7 @@ StackMap* parseStackMap() {
 
     if (VERBOSITY() >= 3)
         printf("%d functions\n", nfunctions);
+    cur_map->stack_size_records.reserve(nfunctions);
     for (int i = 0; i < nfunctions; i++) {
         const StackMap::StackSizeRecord& size_record = *ptr.size_record++;
         cur_map->stack_size_records.push_back(size_record);
@@ -79,6 +80,7 @@ StackMap* parseStackMap() {
 
     if (VERBOSITY() >= 3)
         printf("%d constants\n", nconstants);
+    cur_map->constants.reserve(nconstants);
 
     for (int i = 0; i < nconstants; i++) {
         uint64_t constant = *ptr.u64++;
@@ -89,16 +91,18 @@ StackMap* parseStackMap() {
 
     if (VERBOSITY() >= 3)
         printf("%d records\n", nrecords);
+    cur_map->records.reserve(nrecords);
 
     for (int i = 0; i < nrecords; i++) {
-        StackMap::Record* record = new StackMap::Record();
-        cur_map->records.push_back(record);
+        cur_map->records.emplace_back();
+        StackMap::Record* record = &cur_map->records.back();
 
         record->id = *ptr.u64++;
         record->offset = *ptr.u32++;
         record->flags = *ptr.u16++; // reserved (record flags)
 
         int numlocations = *ptr.u16++;
+        record->locations.reserve(numlocations);
 
         if (VERBOSITY() >= 3)
             printf("Stackmap record %ld at 0x%x has %d locations:\n", record->id, record->offset, numlocations);
@@ -125,6 +129,7 @@ StackMap* parseStackMap() {
 
         ptr.u16++; // padding
         int num_live_outs = *ptr.u16++;
+        record->live_outs.reserve(num_live_outs);
         for (int i = 0; i < num_live_outs; i++) {
             const StackMap::Record::LiveOut& r = *ptr.record_liveout++;
             record->live_outs.push_back(r);

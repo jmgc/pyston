@@ -1,4 +1,3 @@
-# expected: fail
 import unittest
 from test import test_support
 
@@ -102,8 +101,7 @@ class ComplexTest(unittest.TestCase):
                            complex(random(), random()))
 
         self.assertRaises(ZeroDivisionError, complex.__div__, 1+1j, 0+0j)
-        # FIXME: The following currently crashes on Alpha
-        # self.assertRaises(OverflowError, pow, 1e200+1j, 1e200+1j)
+        self.assertRaises(OverflowError, pow, 1e200+1j, 1e200+1j)
 
     def test_truediv(self):
         self.assertAlmostEqual(complex.__truediv__(2+0j, 1+1j), 1-1j)

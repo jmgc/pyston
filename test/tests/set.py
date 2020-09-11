@@ -1,4 +1,7 @@
-s1 = {1}
+# This file changed behavior in a recent version of CPython, so there is a
+# set.expected file
+
+s1 = {1, 1}
 
 def sorted(s):
     l = list(s)
@@ -117,6 +120,22 @@ class MySet(set):
 class MyFrozenset(frozenset):
     pass
 
+s = s1 = set()
+s |= MySet(range(2))
+print sorted(s), sorted(s1)
+s &= MySet(range(1))
+print sorted(s), sorted(s1)
+s ^= MySet(range(4))
+print sorted(s), sorted(s1)
+s -= MySet(range(3))
+print sorted(s), sorted(s1)
+
+try:
+    set() | range(5)
+    assert 0
+except TypeError as e:
+    print e
+
 compare_to = []
 for i in xrange(10):
     compare_to.append(set(range(i)))
@@ -125,11 +144,138 @@ for i in xrange(10):
     compare_to.append(MyFrozenset(range(i)))
     compare_to.append(range(i))
     compare_to.append(range(i, 10))
+    compare_to.append([0, 0, 1, 1])
 
 for s1 in set(range(5)), frozenset(range(5)):
     for s2 in compare_to:
-        print type(s2), sorted(s2), s.issubset(s2), s.issuperset(s2), s == s2, s != s2, s.difference(s2), s.isdisjoint(s2), sorted(s1.union(s2)), sorted(s1.intersection(s2))
-
+        print type(s2), sorted(s2), s1.issubset(s2), s1.issuperset(s2), sorted(s1.difference(s2)), s1.isdisjoint(s2), sorted(s1.union(s2)), sorted(s1.intersection(s2)), sorted(s1.symmetric_difference(s2))
+        print s1 == s2, s1 != s2
+        try:
+            print s1 < s2, s1 <= s2, s1 > s2, s1 >= s2
+        except Exception as e:
+            print e
 f = float('nan')
 s = set([f])
 print f in s, f == list(s)[0]
+
+for fn in (set.intersection_update, set.difference_update, set.symmetric_difference_update, set.__sub__,
+            set.__or__, set.__xor__, set.__and__):
+    s1 = set([3, 5])
+    s2 = set([1, 5])
+    r = fn(s1, s2)
+    if r:
+        print r,
+    print sorted(s1), sorted(s2)
+
+def test_set_creation(base):
+    print "Testing with base =", base
+    # set.__new__ should not iterate through the argument.
+    # sqlalchemy overrides init and expects to be able to do the iteration there.
+    def g():
+        for i in xrange(5):
+            print "iterating", i
+            yield i
+
+    print "Calling __new__:"
+    s = base.__new__(base, g())
+    print "Calling __init__:"
+    s.__init__(g())
+
+    print "Trying subclassing"
+    class MySet(base):
+        def __new__(cls, g):
+            print "starting new"
+            r = base.__new__(cls, g)
+            print "ending new"
+            return r
+        def __init__(self, g):
+            print "starting init"
+            print list(g)
+
+
+    print MySet(g())
+test_set_creation(set)
+test_set_creation(frozenset)
+
+set(**{})
+try:
+    set(**dict(a=1))
+except TypeError:
+    print "TypeError"
+
+
+class MySet(set):
+    def __new__(cls, *args, **kwargs):
+        return set.__new__(cls, *args)
+
+try:
+    MySet(a=1)
+except TypeError as e:
+    print(e.message)
+
+
+class SetSubclassWithKeywordArgs(set):
+    def __init__(self, iterable=[], newarg=None):
+        set.__init__(self, iterable)
+
+SetSubclassWithKeywordArgs(newarg=1)
+
+try:
+    frozenset(a=1)
+except TypeError as e:
+    print(e.message)
+
+
+class MyFrozenSet(frozenset):
+    def __new__(cls, *args, **kwargs):
+        return frozenset.__new__(cls, *args)
+
+MyFrozenSet(a=1)
+
+
+class FrozensetSubclassWithKeywordArgs(frozenset):
+    def __init__(self, iterable=[], newarg=None):
+        frozenset.__init__(self, iterable)
+
+FrozensetSubclassWithKeywordArgs(newarg=1)
+
+print(set() in frozenset([frozenset()]))
+
+
+class MySet(set):
+    def __hash__(self):
+        print("calling __hash__")
+        return id(self)
+
+print("Ready")
+foo = MySet()
+a = set()
+a.add(foo)
+print(a.remove(foo))
+print(foo in set())
+
+
+# Remove an item using a different key:
+s = set()
+s.add(1)
+s.remove(1L)
+
+s = set([1, 2, 3, 4])
+s2 = set([3L, 4L, 5L, 6L])
+s.symmetric_difference_update(s2)
+
+# make sure we are inserting the tuple elements in reverse:
+print {1, 1L}, {1L, 1}, set([1, 1L]), set([1L, 1])
+s = {1}
+s.add(1L)
+print s
+
+from api_test import set_size
+
+s = set([1, 2, 3, 4])
+print(set_size(s))
+
+try:
+    {{}}
+except Exception as e:
+    print e

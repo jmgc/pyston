@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,22 +21,21 @@
 #include <ucontext.h>
 #include <vector>
 
+#include "Python.h"
+
 #include "core/common.h"
 #include "core/thread_utils.h"
-#include "gc/collector.h"
 
 namespace pyston {
 class Box;
 class BoxedGenerator;
 
-namespace gc {
-class GCVisitor;
-}
-
 #if ENABLE_SAMPLING_PROFILER
 extern int sigprof_pending;
 void _printStacktrace();
 #endif
+
+extern __thread PyThreadState cur_thread_state;
 
 namespace threading {
 
@@ -50,47 +49,12 @@ intptr_t start_thread(void* (*start_func)(Box*, Box*, Box*), Box* arg1, Box* arg
 void registerMainThread();
 void finishMainThread();
 
-// Hook for the GC; will visit all the threads (including the current one), visiting their
-// stacks and thread-local PyThreadState objects
-void visitAllStacks(gc::GCVisitor* v);
+bool isMainThread();
 
-// Some hooks to keep track of the list of stacks that this thread has been using.
-// Every time we switch to a new generator, we need to pass a reference to the generator
-// itself (so we can access the registers it is saving), the location of the new stack, and
-// where we stopped executing on the old stack.
-void pushGenerator(BoxedGenerator* g, void* new_stack_start, void* old_stack_limit);
-void popGenerator();
-
-
-#ifndef THREADING_USE_GIL
-#define THREADING_USE_GIL 1
-#define THREADING_USE_GRWL 0
-#endif
-#define THREADING_SAFE_DATASTRUCTURES THREADING_USE_GRWL
-
-#if THREADING_SAFE_DATASTRUCTURES
-#define DS_DEFINE_MUTEX(name) pyston::threading::PthreadFastMutex name
-
-#define DS_DECLARE_RWLOCK(name) extern pyston::threading::PthreadRWLock name
-#define DS_DEFINE_RWLOCK(name) pyston::threading::PthreadRWLock name
-
-#define DS_DEFINE_SPINLOCK(name) pyston::threading::PthreadSpinLock name
-#else
-#define DS_DEFINE_MUTEX(name) pyston::threading::NopLock name
-
-#define DS_DECLARE_RWLOCK(name) extern pyston::threading::NopLock name
-#define DS_DEFINE_RWLOCK(name) pyston::threading::NopLock name
-
-#define DS_DEFINE_SPINLOCK(name) pyston::threading::NopLock name
-#endif
-
-void acquireGLRead();
-void releaseGLRead();
-void acquireGLWrite();
-void releaseGLWrite();
 void _allowGLReadPreemption();
 
 #define GIL_CHECK_INTERVAL 1000
+
 // Note: this doesn't need to be an atomic, since it should
 // only be accessed by the thread that holds the gil:
 extern int gil_check_count;
@@ -109,16 +73,6 @@ extern "C" inline void allowGLReadPreemption() {
     }
 #endif
 
-    // We need to call the finalizers on dead objects at some point. This is a safe place to do so.
-    // This needs to be done before checking for other threads waiting on the GIL since there could
-    // be only one thread doing a lot of work. Similarly for weakref callbacks.
-    //
-    // The conditional is an optimization - the function will do nothing if the lists are empty,
-    // but it's worth checking for to avoid the overhead of making a function call.
-    if (!gc::pending_finalization_list.empty() || !gc::weakrefs_needing_callback_list.empty()) {
-        gc::callPendingDestructionLogic();
-    }
-
     // Double-checked locking: first read with no ordering constraint:
     if (!threads_waiting_on_gil.load(std::memory_order_relaxed))
         return;
@@ -129,24 +83,7 @@ extern "C" inline void allowGLReadPreemption() {
 
     _allowGLReadPreemption();
 }
-// Note: promoteGL is free to drop the lock and then reacquire
-void promoteGL();
-void demoteGL();
 
-
-
-#define MAKE_REGION(name, start, end)                                                                                  \
-    class name {                                                                                                       \
-    public:                                                                                                            \
-        name() { start(); }                                                                                            \
-        ~name() { end(); }                                                                                             \
-    };
-
-MAKE_REGION(GLReadRegion, acquireGLRead, releaseGLRead);
-MAKE_REGION(GLPromoteRegion, promoteGL, demoteGL);
-// MAKE_REGION(GLReadReleaseRegion, releaseGLRead, acquireGLRead);
-// MAKE_REGION(GLWriteReleaseRegion, releaseGLWrite, acquireGLWrite);
-#undef MAKE_REGION
 
 extern "C" void beginAllowThreads() noexcept;
 extern "C" void endAllowThreads() noexcept;
@@ -158,37 +95,7 @@ public:
 };
 
 
-#if THREADING_USE_GIL
-inline void acquireGLRead() {
-    acquireGLWrite();
-}
-inline void releaseGLRead() {
-    releaseGLWrite();
-}
-inline void promoteGL() {
-}
-inline void demoteGL() {
-}
-#endif
-
-#if !THREADING_USE_GIL && !THREADING_USE_GRWL
-inline void acquireGLRead() {
-}
-inline void releaseGLRead() {
-}
-inline void acquireGLWrite() {
-}
-inline void releaseGLWrite() {
-}
-inline void promoteGL() {
-}
-inline void demoteGL() {
-}
-extern "C" inline void allowGLReadPreemption() __attribute__((visibility("default")));
-extern "C" inline void allowGLReadPreemption() {
-}
-#endif
-
+extern bool forgot_refs_via_fork;
 
 } // namespace threading
 } // namespace pyston

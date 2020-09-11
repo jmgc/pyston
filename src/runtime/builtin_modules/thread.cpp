@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include "pythread.h"
 
 #include "capi/typeobject.h"
+#include "capi/types.h"
 #include "core/threading.h"
 #include "core/types.h"
 #include "runtime/objmodel.h"
@@ -28,6 +29,7 @@ using namespace pyston::threading;
 
 extern "C" void initthread();
 
+std::atomic_long nb_threads;
 
 static int initialized;
 static void PyThread__init_thread(void); /* Forward */
@@ -58,9 +60,13 @@ static size_t _pythread_stacksize = 0;
 
 namespace pyston {
 
-static void* thread_start(Box* target, Box* varargs, Box* kwargs) {
+static void* thread_start(STOLEN(Box*) target, STOLEN(Box*) varargs, STOLEN(Box*) kwargs) {
     assert(target);
     assert(varargs);
+
+    AUTO_DECREF(target);
+    AUTO_DECREF(varargs);
+    AUTO_XDECREF(kwargs);
 
 #if STAT_TIMERS
     // TODO: maybe we should just not log anything for threads...
@@ -69,23 +75,29 @@ static void* thread_start(Box* target, Box* varargs, Box* kwargs) {
     timer.pushTopLevel(getCPUTicks());
 #endif
 
+    ++nb_threads;
+
     try {
-        runtimeCall(target, ArgPassSpec(0, 0, true, kwargs != NULL), varargs, kwargs, NULL, NULL, NULL);
+        autoDecref(runtimeCall(target, ArgPassSpec(0, 0, true, kwargs != NULL), varargs, kwargs, NULL, NULL, NULL));
     } catch (ExcInfo e) {
-        e.printExcAndTraceback();
+        if (!e.matches(SystemExit))
+            e.printExcAndTraceback();
+        e.clear();
     }
 
 #if STAT_TIMERS
     timer.popTopLevel(getCPUTicks());
 #endif
 
+    --nb_threads;
+
     return NULL;
 }
 
 // TODO this should take kwargs, which defaults to empty
 Box* startNewThread(Box* target, Box* args, Box* kw) {
-    intptr_t thread_id = start_thread(&thread_start, target, args, kw);
-    return boxInt(thread_id ^ 0x12345678901L);
+    intptr_t thread_id = start_thread(&thread_start, incref(target), incref(args), xincref(kw));
+    return boxInt(thread_id);
 }
 
 #define CHECK_STATUS(name)                                                                                             \
@@ -116,13 +128,13 @@ private:
 public:
     BoxedThreadLock() { lock_lock = PyThread_allocate_lock(); }
 
-    DEFAULT_CLASS(thread_lock_cls);
+    DEFAULT_CLASS_SIMPLE(thread_lock_cls, false);
 
     static Box* acquire(Box* _self, Box* _waitflag) {
         RELEASE_ASSERT(_self->cls == thread_lock_cls, "");
         BoxedThreadLock* self = static_cast<BoxedThreadLock*>(_self);
 
-        RELEASE_ASSERT(isSubclass(_waitflag->cls, int_cls), "");
+        RELEASE_ASSERT(PyInt_Check(_waitflag), "");
         int waitflag = static_cast<BoxedInt*>(_waitflag)->n;
 
         int rtn;
@@ -142,16 +154,16 @@ public:
         if (PyThread_acquire_lock(self->lock_lock, 0)) {
             PyThread_release_lock(self->lock_lock);
             raiseExcHelper(ThreadError, "release unlocked lock");
-            return None;
+            return incref(Py_None);
         }
 
         PyThread_release_lock(self->lock_lock);
-        return None;
+        return incref(Py_None);
     }
 
     static Box* exit(Box* _self, Box* arg1, Box* arg2, Box** args) { return release(_self); }
 
-    static void threadLockDestructor(Box* _self) {
+    static void dealloc(Box* _self) {
         RELEASE_ASSERT(_self->cls == thread_lock_cls, "");
         BoxedThreadLock* self = static_cast<BoxedThreadLock*>(_self);
 
@@ -161,7 +173,21 @@ public:
             PyThread_release_lock(self->lock_lock);
 
             PyThread_free_lock(self->lock_lock);
+            self->lock_lock = NULL;
         }
+
+        _self->cls->tp_free(_self);
+    }
+
+    static Box* locked(Box* _self) {
+        RELEASE_ASSERT(_self->cls == thread_lock_cls, "");
+        BoxedThreadLock* self = static_cast<BoxedThreadLock*>(_self);
+
+        if (PyThread_acquire_lock(self->lock_lock, 0)) {
+            PyThread_release_lock(self->lock_lock);
+            Py_RETURN_FALSE;
+        }
+        Py_RETURN_TRUE;
     }
 };
 
@@ -174,9 +200,35 @@ Box* getIdent() {
     return boxInt(pthread_self());
 }
 
-Box* stackSize() {
-    Py_FatalError("unimplemented");
+Box* stackSize(Box* arg) {
+    if (arg) {
+        if (PyInt_Check(arg) && PyInt_AS_LONG(arg) == 0) {
+            Py_RETURN_NONE;
+        }
+        raiseExcHelper(ThreadError, "Changing initial stack size is not supported in Pyston");
+    }
+    return boxInt(0);
 }
+
+Box* threadCount() {
+    return boxInt(nb_threads);
+}
+
+static PyObject* thread_PyThread_exit_thread(PyObject* self) noexcept {
+    PyErr_SetNone(PyExc_SystemExit);
+    return NULL;
+}
+
+PyDoc_STRVAR(exit_doc, "exit()\n\
+(exit_thread() is an obsolete synonym)\n\
+\n\
+This is synonymous to ``raise SystemExit''.  It will cause the current\n\
+thread to exit silently unless the exception is caught.");
+
+static PyMethodDef thread_methods[] = {
+    { "exit_thread", (PyCFunction)thread_PyThread_exit_thread, METH_NOARGS, exit_doc },
+    { "exit", (PyCFunction)thread_PyThread_exit_thread, METH_NOARGS, exit_doc },
+};
 
 void setupThread() {
     // Hacky: we want to use some of CPython's implementation of the thread module (the threading local stuff),
@@ -185,39 +237,51 @@ void setupThread() {
     initthread();
     RELEASE_ASSERT(!PyErr_Occurred(), "");
 
-    Box* thread_module = getSysModulesDict()->getOrNull(boxString("thread"));
+    Box* thread_module = getSysModulesDict()->getOrNull(autoDecref(boxString("thread")));
     assert(thread_module);
 
-    thread_module->giveAttr("start_new_thread", new BoxedBuiltinFunctionOrMethod(
-                                                    boxRTFunction((void*)startNewThread, BOXED_INT, 3, 1, false, false),
-                                                    "start_new_thread", { NULL }));
-    thread_module->giveAttr("allocate_lock", new BoxedBuiltinFunctionOrMethod(
-                                                 boxRTFunction((void*)allocateLock, UNKNOWN, 0), "allocate_lock"));
     thread_module->giveAttr(
-        "get_ident", new BoxedBuiltinFunctionOrMethod(boxRTFunction((void*)getIdent, BOXED_INT, 0), "get_ident"));
-    thread_module->giveAttr(
-        "stack_size", new BoxedBuiltinFunctionOrMethod(boxRTFunction((void*)stackSize, BOXED_INT, 0), "stack_size"));
+        "start_new_thread",
+        new BoxedBuiltinFunctionOrMethod(
+            BoxedCode::create((void*)startNewThread, BOXED_INT, 3, false, false, "start_new_thread"), { NULL }));
+    thread_module->giveAttrBorrowed("start_new", thread_module->getattr(getStaticString("start_new_thread")));
 
-    thread_lock_cls = BoxedHeapClass::create(type_cls, object_cls, NULL, 0, 0, sizeof(BoxedThreadLock), false, "lock");
-    thread_lock_cls->tp_dealloc = BoxedThreadLock::threadLockDestructor;
-    thread_lock_cls->has_safe_tp_dealloc = true;
+    thread_module->giveAttr("allocate_lock", new BoxedBuiltinFunctionOrMethod(
+                                                 BoxedCode::create((void*)allocateLock, UNKNOWN, 0, "allocate_lock")));
+    thread_module->giveAttr(
+        "get_ident", new BoxedBuiltinFunctionOrMethod(BoxedCode::create((void*)getIdent, BOXED_INT, 0, "get_ident")));
+    thread_module->giveAttr("stack_size", new BoxedBuiltinFunctionOrMethod(
+                                              BoxedCode::create((void*)stackSize, UNKNOWN, 1, "stack_size"), { NULL }));
+    thread_module->giveAttr(
+        "_count", new BoxedBuiltinFunctionOrMethod(BoxedCode::create((void*)threadCount, BOXED_INT, 0, "_count")));
+
+    thread_lock_cls = BoxedClass::create(type_cls, object_cls, 0, 0, sizeof(BoxedThreadLock), false, "lock", true,
+                                         BoxedThreadLock::dealloc, NULL, false);
+    thread_lock_cls->instances_are_nonzero = true;
 
     thread_lock_cls->giveAttr("__module__", boxString("thread"));
-    thread_lock_cls->giveAttr(
-        "acquire", new BoxedFunction(boxRTFunction((void*)BoxedThreadLock::acquire, BOXED_BOOL, 2, 1, false, false),
-                                     { boxInt(1) }));
-    thread_lock_cls->giveAttr("release", new BoxedFunction(boxRTFunction((void*)BoxedThreadLock::release, NONE, 1)));
-    thread_lock_cls->giveAttr("acquire_lock", thread_lock_cls->getattr(internStringMortal("acquire")));
-    thread_lock_cls->giveAttr("release_lock", thread_lock_cls->getattr(internStringMortal("release")));
-    thread_lock_cls->giveAttr("__enter__", thread_lock_cls->getattr(internStringMortal("acquire")));
-    thread_lock_cls->giveAttr("__exit__", new BoxedFunction(boxRTFunction((void*)BoxedThreadLock::exit, NONE, 4)));
+    thread_lock_cls->giveAttr("acquire",
+                              new BoxedFunction(BoxedCode::create((void*)BoxedThreadLock::acquire, BOXED_BOOL, 2, false,
+                                                                  false, "thread_lock.acquire"),
+                                                { autoDecref(boxInt(1)) }));
+    thread_lock_cls->giveAttr("release", new BoxedFunction(BoxedCode::create((void*)BoxedThreadLock::release, NONE, 1,
+                                                                             "thread_lock.release")));
+    thread_lock_cls->giveAttrBorrowed("acquire_lock", thread_lock_cls->getattr(getStaticString("acquire")));
+    thread_lock_cls->giveAttrBorrowed("release_lock", thread_lock_cls->getattr(getStaticString("release")));
+    thread_lock_cls->giveAttrBorrowed("__enter__", thread_lock_cls->getattr(getStaticString("acquire")));
+    thread_lock_cls->giveAttr("__exit__", new BoxedFunction(BoxedCode::create((void*)BoxedThreadLock::exit, NONE, 4,
+                                                                              "thread_lock.__exit__")));
+    thread_lock_cls->giveAttr("locked", new BoxedFunction(BoxedCode::create((void*)BoxedThreadLock::locked, BOXED_BOOL,
+                                                                            1, "thread_lock.locked")));
+    thread_lock_cls->giveAttrBorrowed("locked_lock", thread_lock_cls->getattr(getStaticString("locked")));
     thread_lock_cls->freeze();
 
-    ThreadError = BoxedHeapClass::create(type_cls, Exception, NULL, Exception->attrs_offset,
-                                         Exception->tp_weaklistoffset, Exception->tp_basicsize, false, "error");
-    ThreadError->giveAttr("__module__", boxString("thread"));
-    ThreadError->freeze();
+    ThreadError = (BoxedClass*)PyErr_NewException("thread.error", NULL, NULL);
+    thread_module->giveAttrBorrowed("error", ThreadError);
 
-    thread_module->giveAttr("error", ThreadError);
+    auto thread_str = getStaticString("thread");
+    for (auto& md : thread_methods) {
+        thread_module->giveAttr(md.ml_name, new BoxedCApiFunction(&md, NULL, thread_str));
+    }
 }
 }

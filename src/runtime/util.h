@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,13 +36,31 @@ inline void sliceIndex(Box* b, int64_t* out) {
         throwCAPIException();
 }
 
-bool isSliceIndex(Box* b);
+bool isSliceIndex(Box* b) noexcept;
 
-void adjustNegativeIndicesOnObject(Box* obj, i64* start, i64* stop);
+void adjustNegativeIndicesOnObject(Box* obj, i64* start, i64* stop) noexcept;
 
 // Adjust the start and stop bounds of the sequence we are slicing to its size.
 // Ensure stop >= start and remain within bounds.
 void boundSliceWithLength(i64* start_out, i64* stop_out, i64 start, i64 stop, i64 size);
+
+BORROWED(Box*) noneIfNull(Box* b);
+Box* boxStringOrNone(const char* s);
+Box* boxStringFromCharPtr(const char* s);
+
+// This function will ascii-encode any unicode objects it gets passed, or return the argument
+// unmodified if it wasn't a unicode object.
+// This is intended for functions that deal with attribute or variable names, which we internally
+// assume will always be strings, but CPython lets be unicode.
+// If we used an encoding like utf8 instead of ascii, we would allow collisions between unicode
+// strings and a string that happens to be its encoding.  It seems safer to just encode as ascii,
+// which will throw an exception if you try to pass something that might run into this risk.
+// (We wrap the unicode error and throw a TypeError)
+template <ExceptionStyle S> Box* coerceUnicodeToStr(Box* unicode) noexcept(S == CAPI);
+
+extern "C" bool hasnext(Box* o);
+extern "C" void dump(void* p);
+extern "C" void dumpEx(void* p, int levels = 0);
 
 template <typename T> void copySlice(T* __restrict__ dst, const T* __restrict__ src, i64 start, i64 step, i64 length) {
     assert(dst != src);

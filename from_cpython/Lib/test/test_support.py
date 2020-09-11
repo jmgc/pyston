@@ -1,3 +1,5 @@
+# skip-if: True
+# - this isn't an actual test file
 """Supporting definitions for the Python regression tests."""
 
 if __name__ != 'test.test_support':
@@ -326,7 +328,9 @@ def _is_gui_available():
                 reason = "cannot run without OS X gui process"
 
     # check on every platform whether tkinter can actually do anything
-    if not reason:
+    # but skip the test on OS X because it can cause segfaults in Cocoa Tk
+    # when running regrtest with the -j option (multiple threads/subprocesses)
+    if (not reason) and (sys.platform != 'darwin'):
         try:
             from Tkinter import Tk
             root = Tk()
@@ -344,20 +348,22 @@ def _is_gui_available():
     return _is_gui_available.result
 
 def is_resource_enabled(resource):
-    """Test whether a resource is enabled.  Known resources are set by
-    regrtest.py."""
-    # Pyston change: we assume that resources are not available in general
-    return use_resources is not None and resource in use_resources
+    """Test whether a resource is enabled.
+
+    Known resources are set by regrtest.py.  If not running under regrtest.py,
+    all resources are assumed enabled unless use_resources has been set.
+    """
+    return use_resources is None or resource in use_resources
 
 def requires(resource, msg=None):
     """Raise ResourceDenied if the specified resource is not available."""
     if resource == 'gui' and not _is_gui_available():
         raise ResourceDenied(_is_gui_available.reason)
-    # Pyston change: we don't check if the caller's module is __main__ using sys._getframe() magic.
     if not is_resource_enabled(resource):
         if msg is None:
             msg = "Use of the `%s' resource not enabled" % resource
         raise ResourceDenied(msg)
+
 
 # Don't use "localhost", since resolving it uses the DNS under recent
 # Windows versions (see issue #18792).
@@ -499,11 +505,6 @@ try:
     have_unicode = True
 except NameError:
     have_unicode = False
-
-requires_unicode = unittest.skipUnless(have_unicode, 'no unicode support')
-
-def u(s):
-    return unicode(s, 'unicode-escape')
 
 is_jython = sys.platform.startswith('java')
 
@@ -748,49 +749,42 @@ class WarningsRecorder(object):
 
 
 def _filterwarnings(filters, quiet=False):
-    # Pyston change:
-    # this bare yield seems to work for now, but we might need to yield up a WarningsRecorder in some cases?
-    yield
-
-    # TODO: Frame introspection in Pyston?
-    # old code follows:
-
-    # """Catch the warnings, then check if all the expected
-    # warnings have been raised and re-raise unexpected warnings.
-    # If 'quiet' is True, only re-raise the unexpected warnings.
-    # """
+    """Catch the warnings, then check if all the expected
+    warnings have been raised and re-raise unexpected warnings.
+    If 'quiet' is True, only re-raise the unexpected warnings.
+    """
     # Clear the warning registry of the calling module
     # in order to re-raise the warnings.
-    # frame = sys._getframe(2)
-    # registry = frame.f_globals.get('__warningregistry__')
-    # if registry:
-    #     registry.clear()
-    # with warnings.catch_warnings(record=True) as w:
-    #     # Set filter "always" to record all warnings.  Because
-    #     # test_warnings swap the module, we need to look up in
-    #     # the sys.modules dictionary.
-    #     sys.modules['warnings'].simplefilter("always")
-    #     yield WarningsRecorder(w)
-    # # Filter the recorded warnings
-    # reraise = [warning.message for warning in w]
-    # missing = []
-    # for msg, cat in filters:
-    #     seen = False
-    #     for exc in reraise[:]:
-    #         message = str(exc)
-    #         # Filter out the matching messages
-    #         if (re.match(msg, message, re.I) and
-    #             issubclass(exc.__class__, cat)):
-    #             seen = True
-    #             reraise.remove(exc)
-    #     if not seen and not quiet:
-    #         # This filter caught nothing
-    #         missing.append((msg, cat.__name__))
-    # if reraise:
-    #     raise AssertionError("unhandled warning %r" % reraise[0])
-    # if missing:
-    #     raise AssertionError("filter (%r, %s) did not catch any warning" %
-    #                          missing[0])
+    frame = sys._getframe(2)
+    registry = frame.f_globals.get('__warningregistry__')
+    if registry:
+        registry.clear()
+    with warnings.catch_warnings(record=True) as w:
+        # Set filter "always" to record all warnings.  Because
+        # test_warnings swap the module, we need to look up in
+        # the sys.modules dictionary.
+        sys.modules['warnings'].simplefilter("always")
+        yield WarningsRecorder(w)
+    # Filter the recorded warnings
+    reraise = [warning.message for warning in w]
+    missing = []
+    for msg, cat in filters:
+        seen = False
+        for exc in reraise[:]:
+            message = str(exc)
+            # Filter out the matching messages
+            if (re.match(msg, message, re.I) and
+                issubclass(exc.__class__, cat)):
+                seen = True
+                reraise.remove(exc)
+        if not seen and not quiet:
+            # This filter caught nothing
+            missing.append((msg, cat.__name__))
+    if reraise:
+        raise AssertionError("unhandled warning %r" % reraise[0])
+    if missing:
+        raise AssertionError("filter (%r, %s) did not catch any warning" %
+                             missing[0])
 
 
 @contextlib.contextmanager

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,8 +24,6 @@ extern "C" double pow_float_float(double lhs, double rhs);
 
 class BoxedFloat;
 bool floatNonzeroUnboxed(BoxedFloat* self);
-
-std::string floatFmt(double x, int precision, char code);
 }
 
 #endif

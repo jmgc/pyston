@@ -101,11 +101,13 @@ sliceable[3:8]
 both[0]
 both[:]
 both[3:8]
+both[slice(3, 8)]
 both[::2] # this should call __getitem__ since __getslice__ doesn't support steps
 
 both[0] = xrange(2)
 both[:] = xrange(2)
 both[3:8] = xrange(2)
+both[slice(3, 8)] = xrange(2)
 both[::2] = xrange(2)
 
 # Should all call getitem as a fallback
@@ -118,6 +120,7 @@ both[1:2:'c']
 del both[0]
 del both[:]
 del both[3:8]
+del both[slice(3, 8)]
 del both [::2]
 
 try:
@@ -163,9 +166,9 @@ print unicodestr[-2:]
 # Calling the slice operator directly does not have the same behavior
 # as using the slice notation []. Namely, it will not modify negative
 # indices.
-print numbers.__getslice__(0, -1);
-print letters.__getslice__(0, -1);
-print unicodestr.__getslice__(0, -1);
+print numbers.__getslice__(0, -1)
+print letters.__getslice__(0, -1)
+print unicodestr.__getslice__(0, -1)
 
 # Other
 class C(object):
@@ -188,3 +191,9 @@ C()[:,:]
 C()[1:2,3:4]
 C()[1:2:3,3:4:5]
 
+# Regression test:
+def f(i):
+    for j in [1, 2, 3][::2]:
+        pass
+for i in xrange(100000):
+    f(i)

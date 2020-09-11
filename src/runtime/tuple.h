@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,13 +27,25 @@ public:
     int pos;
     BoxedTupleIterator(BoxedTuple* t);
 
-    DEFAULT_CLASS(tuple_iterator_cls);
+    DEFAULT_CLASS_SIMPLE(tuple_iterator_cls, true);
+
+    static void dealloc(BoxedTupleIterator* o) noexcept {
+        PyObject_GC_UnTrack(o);
+        Py_DECREF(o->t);
+        o->cls->tp_free(o);
+    }
+
+    static int traverse(BoxedTupleIterator* self, visitproc visit, void* arg) noexcept {
+        Py_VISIT(self->t);
+        return 0;
+    }
 };
 
-Box* tupleIter(Box* self);
+Box* tupleIter(Box* self) noexcept;
 Box* tupleIterIter(Box* self);
 Box* tupleiterHasnext(Box* self);
-i1 tupleiterHasnextUnboxed(Box* self);
+llvm_compat_bool tupleiterHasnextUnboxed(Box* self);
+Box* tupleiter_next(Box* self) noexcept;
 Box* tupleiterNext(Box* self);
 }
 

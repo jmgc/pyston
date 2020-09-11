@@ -1,5 +1,4 @@
 # I would have expected this to be valid, but cPython and pypy err out saying "name 'x' is local and global"
-
 try:
     exec """
 x = 1
@@ -40,7 +39,7 @@ except SyntaxError as e:
 
 try:
     exec """
-def f(*kwargs):
+def f(**kwargs):
     global kwargs
 
 print "calling"

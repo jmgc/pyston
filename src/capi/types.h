@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,37 +30,71 @@ public:
     Box* module;
 
 public:
-    BoxedCApiFunction(PyMethodDef* method_def, Box* passthrough, Box* module = NULL)
-        : method_def(method_def), passthrough(passthrough), module(module) {}
+    BoxedCApiFunction(PyMethodDef* method_def, Box* passthrough, Box* module_name)
+        : method_def(method_def), passthrough(passthrough), module(module_name) {
+        assert(!module || PyString_Check(module_name));
+        Py_XINCREF(passthrough);
+        Py_XINCREF(module);
+    }
 
-    DEFAULT_CLASS(capifunc_cls);
+    DEFAULT_CLASS_SIMPLE(capifunc_cls, true);
 
     PyCFunction getFunction() { return method_def->ml_meth; }
 
-    static BoxedString* __repr__(BoxedCApiFunction* self) {
-        assert(self->cls == capifunc_cls);
-        return boxString(self->method_def->ml_name);
+    template <ExceptionStyle S> static Box* __repr__(Box* _self) noexcept(S == CAPI) {
+        if (!isSubclass(_self->cls, capifunc_cls))
+            return setDescrTypeError<S>(_self, "capifunc", "__repr__");
+        BoxedCApiFunction* self = (BoxedCApiFunction*)_self;
+        if (self->passthrough == NULL)
+            return callCAPIFromStyle<S>(PyString_FromFormat, "<built-in function %s>", self->method_def->ml_name);
+        return callCAPIFromStyle<S>(PyString_FromFormat, "<built-in method %s of %s object at %p>",
+                                    self->method_def->ml_name, self->passthrough->cls->tp_name, self->passthrough);
     }
 
     static Box* __call__(BoxedCApiFunction* self, BoxedTuple* varargs, BoxedDict* kwargs);
+    template <ExceptionStyle S>
     static Box* tppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1, Box* arg2, Box* arg3,
-                        Box** args, const std::vector<BoxedString*>* keyword_names);
+                        Box** args, const std::vector<BoxedString*>* keyword_names) noexcept(S == CAPI);
 
-    static Box* getname(Box* b, void*) {
+    static Box* getname(Box* b, void*) noexcept {
         RELEASE_ASSERT(b->cls == capifunc_cls, "");
         const char* s = static_cast<BoxedCApiFunction*>(b)->method_def->ml_name;
         if (s)
             return boxString(s);
-        return None;
+        return incref(Py_None);
     }
 
-    static void gcHandler(GCVisitor* v, Box* _o) {
-        assert(_o->cls == capifunc_cls);
-        BoxedCApiFunction* o = static_cast<BoxedCApiFunction*>(_o);
+    static Box* doc(Box* b, void*) noexcept {
+        RELEASE_ASSERT(b->cls == capifunc_cls, "");
+        const char* s = static_cast<BoxedCApiFunction*>(b)->method_def->ml_doc;
+        if (s)
+            return boxString(s);
+        return incref(Py_None);
+    }
 
-        boxGCHandler(v, o);
-        v->visit(o->passthrough);
-        v->visit(o->module);
+    static void dealloc(Box* _o) noexcept {
+        BoxedCApiFunction* o = (BoxedCApiFunction*)_o;
+
+        _PyObject_GC_UNTRACK(o);
+        Py_XDECREF(o->module);
+        Py_XDECREF(o->passthrough);
+        o->cls->tp_free(o);
+    }
+
+    static int traverse(Box* _o, visitproc visit, void* arg) noexcept {
+        BoxedCApiFunction* o = (BoxedCApiFunction*)_o;
+
+        Py_VISIT(o->module);
+        Py_VISIT(o->passthrough);
+        return 0;
+    }
+
+    static int clear(Box* _o) noexcept {
+        BoxedCApiFunction* o = (BoxedCApiFunction*)_o;
+
+        Py_CLEAR(o->module);
+        Py_CLEAR(o->passthrough);
+        return 0;
     }
 };
 static_assert(sizeof(BoxedCApiFunction) == sizeof(PyCFunctionObject), "");
@@ -68,6 +102,7 @@ static_assert(offsetof(BoxedCApiFunction, method_def) == offsetof(PyCFunctionObj
 static_assert(offsetof(BoxedCApiFunction, passthrough) == offsetof(PyCFunctionObject, m_self), "");
 static_assert(offsetof(BoxedCApiFunction, module) == offsetof(PyCFunctionObject, m_module), "");
 
+PyObject* try_3way_to_rich_compare(PyObject* v, PyObject* w, int op) noexcept;
 PyObject* convert_3way_to_object(int op, int c) noexcept;
 int default_3way_compare(PyObject* v, PyObject* w);
 

@@ -3453,6 +3453,9 @@ initparser(void)
     if (PyModule_AddObject(module, "ParserError", parser_error) != 0)
         return;
 
+    // Pyston change:
+    PyType_Ready(&PyST_Type);
+
     Py_INCREF(&PyST_Type);
     PyModule_AddObject(module, "ASTType", (PyObject*)&PyST_Type);
     Py_INCREF(&PyST_Type);
@@ -3474,7 +3477,7 @@ initparser(void)
         PyObject *func, *pickler;
 
         func = PyObject_GetAttrString(copyreg, "pickle");
-        pickle_constructor = PyObject_GetAttrString(module, "sequence2st");
+        pickle_constructor = PyGC_RegisterStaticConstant(PyObject_GetAttrString(module, "sequence2st"));
         pickler = PyObject_GetAttrString(module, "_pickler");
         Py_XINCREF(pickle_constructor);
         if ((func != NULL) && (pickle_constructor != NULL)

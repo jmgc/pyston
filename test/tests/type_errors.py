@@ -32,3 +32,58 @@ try:
     print 1.0[0]
 except TypeError, e:
     print e
+
+
+
+def f2():
+    if 0:
+        1 in l
+        l = []
+
+for i in xrange(100):
+    f2()
+
+
+# make sure we don't abort when calling a type which is not callable
+def f(call):
+    i = 1
+    f = 1.0
+    l = 1l
+    s = "str"
+    t = (1,)
+    
+    if call:
+       i()
+       f()
+       l()
+       s()
+       t()
+try:
+    for i in range(10000):
+        f(i == 9999)
+except TypeError, e:
+    print e
+
+
+# make sure we don't abort when calling getitem
+def f(error):
+    i = 1
+    f = 1.0
+    l = 1l
+    
+    if error:
+       i[:]
+       f[:]
+       l[:]
+       i[1]
+       f[1]
+       l[1]
+       i[1:2]
+       f[1:2]
+       l[1:2]
+
+try:
+    for i in range(10000):
+        f(i == 9999)
+except TypeError as e:
+    print e

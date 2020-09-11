@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -86,6 +86,7 @@ static PyObject* do_mklist(const char**, va_list*, int, int, int) noexcept;
 static PyObject* do_mkdict(const char**, va_list*, int, int, int) noexcept;
 static PyObject* do_mkvalue(const char**, va_list*, int) noexcept;
 
+typedef double va_double;
 static PyObject* do_mkvalue(const char** p_format, va_list* p_va, int flags) noexcept {
     for (;;) {
         switch (*(*p_format)++) {
@@ -124,72 +125,15 @@ static PyObject* do_mkvalue(const char** p_format, va_list* p_va, int flags) noe
             case 'l':
                 return PyInt_FromLong(va_arg(*p_va, long));
 
-            case 'd':
-                return PyFloat_FromDouble(va_arg(*p_va, double));
-
-            case 'c': {
-                char p[1];
-                p[0] = (char)va_arg(*p_va, int);
-                return PyString_FromStringAndSize(p, 1);
+            case 'k': {
+                unsigned long n;
+                n = va_arg(*p_va, unsigned long);
+                if (n > (unsigned long)PyInt_GetMax())
+                    return PyLong_FromUnsignedLong(n);
+                else
+                    return PyInt_FromLong(n);
             }
 
-            case 'N':
-            case 'S':
-            case 'O':
-                if (**p_format == '&') {
-                    typedef PyObject* (*converter)(void*);
-                    converter func = va_arg(*p_va, converter);
-                    void* arg = va_arg(*p_va, void*);
-                    ++*p_format;
-                    return (*func)(arg);
-                } else {
-                    PyObject* v;
-                    v = va_arg(*p_va, PyObject*);
-                    if (v != NULL) {
-                        if (*(*p_format - 1) != 'N')
-                            Py_INCREF(v);
-                    } else if (!PyErr_Occurred())
-                        /* If a NULL was passed
-                         * because a call that should
-                         * have constructed a value
-                         * failed, that's OK, and we
-                         * pass the error on; but if
-                         * no error occurred it's not
-                         * clear that the caller knew
-                         * what she was doing. */
-                        PyErr_SetString(PyExc_SystemError, "NULL object passed to Py_BuildValue");
-                    return v;
-                }
-
-            case 's':
-            case 'z': {
-                PyObject* v;
-                char* str = va_arg(*p_va, char*);
-                Py_ssize_t n;
-                if (**p_format == '#') {
-                    ++*p_format;
-                    if (flags & FLAG_SIZE_T)
-                        n = va_arg(*p_va, Py_ssize_t);
-                    else
-                        n = va_arg(*p_va, int);
-                } else
-                    n = -1;
-                if (str == NULL) {
-                    v = Py_None;
-                    Py_INCREF(v);
-                } else {
-                    if (n < 0) {
-                        size_t m = strlen(str);
-                        if (m > PY_SSIZE_T_MAX) {
-                            PyErr_SetString(PyExc_OverflowError, "string too long for Python string");
-                            return NULL;
-                        }
-                        n = (Py_ssize_t)m;
-                    }
-                    v = PyString_FromStringAndSize(str, n);
-                }
-                return v;
-            }
 #ifdef HAVE_LONG_LONG
             case 'L':
                 return PyLong_FromLongLong((PY_LONG_LONG)va_arg(*p_va, PY_LONG_LONG));
@@ -221,6 +165,78 @@ static PyObject* do_mkvalue(const char** p_format, va_list* p_va, int flags) noe
                 return v;
             }
 #endif
+            case 'f':
+            case 'd':
+                return PyFloat_FromDouble((double)va_arg(*p_va, va_double));
+
+#ifndef WITHOUT_COMPLEX
+            case 'D':
+                return PyComplex_FromCComplex(*((Py_complex*)va_arg(*p_va, Py_complex*)));
+#endif /* WITHOUT_COMPLEX */
+
+            case 'c': {
+                char p[1];
+                p[0] = (char)va_arg(*p_va, int);
+                return PyString_FromStringAndSize(p, 1);
+            }
+
+            case 's':
+            case 'z': {
+                PyObject* v;
+                char* str = va_arg(*p_va, char*);
+                Py_ssize_t n;
+                if (**p_format == '#') {
+                    ++*p_format;
+                    if (flags & FLAG_SIZE_T)
+                        n = va_arg(*p_va, Py_ssize_t);
+                    else
+                        n = va_arg(*p_va, int);
+                } else
+                    n = -1;
+                if (str == NULL) {
+                    v = Py_None;
+                    Py_INCREF(v);
+                } else {
+                    if (n < 0) {
+                        size_t m = strlen(str);
+                        if (m > PY_SSIZE_T_MAX) {
+                            PyErr_SetString(PyExc_OverflowError, "string too long for Python string");
+                            return NULL;
+                        }
+                        n = (Py_ssize_t)m;
+                    }
+                    v = PyString_FromStringAndSize(str, n);
+                }
+                return v;
+            }
+
+            case 'N':
+            case 'S':
+            case 'O':
+                if (**p_format == '&') {
+                    typedef PyObject* (*converter)(void*);
+                    converter func = va_arg(*p_va, converter);
+                    void* arg = va_arg(*p_va, void*);
+                    ++*p_format;
+                    return (*func)(arg);
+                } else {
+                    PyObject* v;
+                    v = va_arg(*p_va, PyObject*);
+                    if (v != NULL) {
+                        if (*(*p_format - 1) != 'N')
+                            Py_INCREF(v);
+                    } else if (!PyErr_Occurred())
+                        /* If a NULL was passed
+                         * because a call that should
+                         * have constructed a value
+                         * failed, that's OK, and we
+                         * pass the error on; but if
+                         * no error occurred it's not
+                         * clear that the caller knew
+                         * what she was doing. */
+                        PyErr_SetString(PyExc_SystemError, "NULL object passed to Py_BuildValue");
+                    return v;
+                }
 
             case ':':
             case ',':
@@ -229,7 +245,8 @@ static PyObject* do_mkvalue(const char** p_format, va_list* p_va, int flags) noe
                 break;
 
             default:
-                RELEASE_ASSERT(0, "%c", *((*p_format) - 1));
+                PyErr_SetString(PyExc_SystemError, "bad format char passed to Py_BuildValue");
+                return NULL;
         }
     }
     abort();
@@ -355,7 +372,7 @@ static PyObject* va_build_value(const char* fmt, va_list va, int flags) noexcept
         return NULL;
 
     if (n == 0)
-        return None;
+        return incref(Py_None);
 
     va_list lva;
     __va_copy(lva, va);
@@ -417,15 +434,20 @@ extern "C" PyObject* Py_InitModule4(const char* name, PyMethodDef* methods, cons
         }
     }
 
-    BoxedModule* module = createModule(name, NULL, doc);
+    BoxedModule* module;
+    try {
+        module = createModule(autoDecref(boxString(name)), NULL, doc);
+    } catch (ExcInfo e) {
+        setCAPIException(e);
+        return NULL;
+    }
 
     // Pass self as is, even if NULL we are not allowed to change it to None
     Box* passthrough = static_cast<Box*>(self);
 
     while (methods && methods->ml_name) {
-        RELEASE_ASSERT((methods->ml_flags & (~(METH_VARARGS | METH_KEYWORDS | METH_NOARGS | METH_O))) == 0, "%d",
-                       methods->ml_flags);
-        module->giveAttr(methods->ml_name, new BoxedCApiFunction(methods, passthrough, boxString(name)));
+        auto capi_func = autoDecref(new BoxedCApiFunction(methods, passthrough, autoDecref(boxString(name))));
+        module->setattr(autoDecref(internStringMortal(methods->ml_name)), capi_func, NULL);
 
         methods++;
     }
@@ -433,18 +455,19 @@ extern "C" PyObject* Py_InitModule4(const char* name, PyMethodDef* methods, cons
     return module;
 }
 
-extern "C" PyObject* PyModule_GetDict(PyObject* _m) noexcept {
+extern "C" BORROWED(PyObject*) PyModule_GetDict(PyObject* _m) noexcept {
     BoxedModule* m = static_cast<BoxedModule*>(_m);
-    assert(m->cls == module_cls);
+    assert(PyModule_Check(m));
 
     return m->getAttrWrapper();
 }
 
-extern "C" int PyModule_AddObject(PyObject* _m, const char* name, PyObject* value) noexcept {
+extern "C" int PyModule_AddObject(PyObject* _m, const char* name, STOLEN(PyObject*) value) noexcept {
     BoxedModule* m = static_cast<BoxedModule*>(_m);
     assert(m->cls == module_cls);
 
-    m->setattr(internStringMortal(name), value, NULL);
+    m->setattr(autoDecref(internStringMortal(name)), value, NULL);
+    Py_DECREF(value);
     return 0;
 }
 
@@ -465,8 +488,8 @@ extern "C" int PyModule_AddIntConstant(PyObject* _m, const char* name, long valu
 extern "C" PyObject* PyModule_New(const char* name) noexcept {
     BoxedModule* module = new BoxedModule();
     module->giveAttr("__name__", boxString(name));
-    module->giveAttr("__doc__", None);
-    module->giveAttr("__package__", None);
+    module->giveAttr("__doc__", incref(Py_None));
+    module->giveAttr("__package__", incref(Py_None));
     return module;
 }
 

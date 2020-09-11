@@ -10,6 +10,8 @@ print repr('"')
 # print repr("'") // don't feel like handling this right now; this should print out (verbatim) "'", ie realize it can use double quotes
 print repr("'\"")
 
+print str(object="test")
+
 print "hello world\tmore\nwords\va\fb\ao".split()
 print "  test  ".split()
 print "  test  ".split(' ')
@@ -92,6 +94,7 @@ for i in xrange(-10, 10):
 print "hello world".partition("hi")
 print "hello world".partition("hello")
 print "hello world".partition("o")
+print "hello world".partition(u"o")
 
 print "hello world"[False:True:True]
 
@@ -111,6 +114,31 @@ def test_just_funcs(s, w):
     t4 = s.ljust(w)
     t5 = s.rjust(w)
     t6 = s.center(w)
+
+    try:
+        print s.ljust("a string")
+    except TypeError as e:
+        print e
+    try:
+        print s.rjust("a string")
+    except TypeError:
+        print e
+    try:
+        print s.center("a string")
+    except TypeError:
+        print e
+    try:
+        print s.ljust(10, 12345)
+    except TypeError:
+        print e
+    try:
+        print s.rjust(10, 12345)
+    except TypeError:
+        print e
+    try:
+        print s.center(10, 12345)
+    except TypeError:
+        print e
 
     print t1, t1 == s, t1 is s, type(t1)
     print t2, t2 == s, t2 is s, type(t2)
@@ -173,3 +201,27 @@ class C(object):
     def __str__(self):
         return "my class"
 print "{0}".format(C())
+
+def irgen_error():
+	for i in range(1):
+		fail = "test".format()
+		print fail
+		fail = "test {0} {1} {2}".format(1, 2, 3)
+		print fail
+irgen_error()
+
+s = "hello"
+for i in xrange(-8, 8):
+    for j in xrange(-8, 8):
+        print i,j, repr(s[i:j])
+        for k in (-2, 1, 1, 2):
+            print i,j,k, repr(s[i:j:k]), repr(s[slice(i, j, k)])
+
+
+class D(str):
+    pass
+
+print(D('abc').__rmod__('%s'))
+
+# Real code needs str to not have an iter!
+print hasattr("", "__iter__")

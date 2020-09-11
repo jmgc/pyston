@@ -31,7 +31,7 @@ def p(x):
     return [hex(ord(i)) for i in x]
 s = u"\u20AC" # euro sign
 print p(u"\N{EURO SIGN}")
-print p(s) 
+print p(s)
 print p(s.encode("utf8"))
 print p(s.encode("utf16"))
 print p(s.encode("utf32"))
@@ -51,7 +51,7 @@ for i in xrange(100):
     print repr(BaseException().__unicode__())
     gc.collect()
     # do some allocations:
-    for j in xrange(100):
+    for j in xrange(101):
         [None] * j
 
 print u'' in ''
@@ -165,3 +165,13 @@ class C(object):
         return MyUnicode("hello world")
 
 print type(unicode(C()))
+print unicode("test", encoding="UTF-8")
+
+class CStr(object):
+    def __str__(self):
+        return u"\u20ac"
+class CRepr(object):
+    def __repr__(self):
+        return u"\u20ac"
+print "%s %s" % (CStr(), CRepr())
+

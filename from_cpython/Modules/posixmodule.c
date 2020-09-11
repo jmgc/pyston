@@ -4935,7 +4935,7 @@ _PyPopen(char *cmdstring, int mode, int n, int bufsize)
      */
     if (!_PyPopenProcs)
     {
-        _PyPopenProcs = PyGC_AddRoot(PyDict_New());
+        _PyPopenProcs = PyDict_New();
     }
 
     if (_PyPopenProcs)
@@ -5682,7 +5682,7 @@ _PyPopen(char *cmdstring, int mode, int n)
       * and variable number of files involved.
       */
      if (!_PyPopenProcs) {
-         _PyPopenProcs = PyGC_AddRoot(PyDict_New());
+         _PyPopenProcs = PyDict_New();
      }
 
      if (_PyPopenProcs) {
@@ -6105,10 +6105,12 @@ wait_helper(pid_t pid, int status, struct rusage *ru)
         PyObject *m = PyImport_ImportModuleNoBlock("resource");
         if (m == NULL)
             return NULL;
-        struct_rusage = PyGC_AddRoot(PyObject_GetAttrString(m, "struct_rusage"));
+        struct_rusage = PyObject_GetAttrString(m, "struct_rusage");
         Py_DECREF(m);
         if (struct_rusage == NULL)
             return NULL;
+        // Pyston addition:
+        PyGC_RegisterStaticConstant(struct_rusage);
     }
 
     /* XXX(nnorwitz): Copied (w/mods) from resource.c, there should be only one. */
@@ -6911,14 +6913,13 @@ posix_fdopen(PyObject *self, PyObject *args)
 #endif
     Py_END_ALLOW_THREADS
     PyMem_FREE(mode);
-    if (fp == NULL)
+    // Pyston change: decref the file object when throw exception
+    if (fp == NULL) {
+        Py_DECREF(f);
         return posix_error();
+    }
     /* We now know we will succeed, so initialize the file object. */
-
-    // Pyston change:
-    PyFile_SetFP(f, fp);
-    //((PyFileObject *)f)->f_fp = fp;
-
+    ((PyFileObject *)f)->f_fp = fp;
     PyFile_SetBufSize(f, bufsize);
     return f;
 }
@@ -9450,8 +9451,10 @@ INITFUNC(void)
     PyModule_AddObject(m, "error", PyExc_OSError);
 
 #ifdef HAVE_PUTENV
-    if (posix_putenv_garbage == NULL)
-        posix_putenv_garbage = PyGC_AddRoot(PyDict_New());
+    if (posix_putenv_garbage == NULL) {
+        posix_putenv_garbage = PyDict_New();
+        PyGC_RegisterStaticConstant(posix_putenv_garbage);
+    }
 #endif
 
     if (!initialized) {

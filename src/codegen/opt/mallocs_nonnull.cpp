@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -184,5 +184,5 @@ FunctionPass* createMallocsNonNullPass() {
 }
 }
 
-static RegisterPass<pyston::MallocsNonNullPass> X("mallocs_nonnull", "Use the fact that malloc() doesnt return NULL",
+static RegisterPass<pyston::MallocsNonNullPass> X("mallocs_nonnull", "Use the fact that malloc() doesn't return NULL",
                                                   true, false);

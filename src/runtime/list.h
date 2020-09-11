@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,19 +28,29 @@ public:
     int pos;
     BoxedListIterator(BoxedList* l, int start);
 
-    DEFAULT_CLASS(list_iterator_cls);
+    static void dealloc(BoxedListIterator* o) noexcept {
+        PyObject_GC_UnTrack(o);
+        Py_XDECREF(o->l);
+        o->cls->tp_free(o);
+    }
+
+    static int traverse(BoxedListIterator* self, visitproc visit, void* arg) noexcept {
+        Py_VISIT(self->l);
+        return 0;
+    }
 };
 
-Box* listIter(Box* self);
+Box* listIter(Box* self) noexcept;
 Box* listIterIter(Box* self);
 Box* listiterHasnext(Box* self);
-i1 listiterHasnextUnboxed(Box* self);
-template <ExceptionStyle::ExceptionStyle S> Box* listiterNext(Box* self) noexcept(S == ExceptionStyle::CAPI);
+llvm_compat_bool listiterHasnextUnboxed(Box* self);
+template <ExceptionStyle S> Box* listiterNext(Box* self) noexcept(S == CAPI);
+Box* listiter_next(Box* s) noexcept;
 Box* listReversed(Box* self);
 Box* listreviterHasnext(Box* self);
-i1 listreviterHasnextUnboxed(Box* self);
+llvm_compat_bool listreviterHasnextUnboxed(Box* self);
 Box* listreviterNext(Box* self);
-void listSort(BoxedList* self, Box* cmp, Box* key, Box* reverse);
+Box* listreviter_next(Box* s) noexcept;
 extern "C" Box* listAppend(Box* self, Box* v);
 }
 

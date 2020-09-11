@@ -33,8 +33,7 @@ try:
 except NameError:
     StringTypes = (StringType,)
 
-# Pyston change: 'buffer' is not implemented yet
-# BufferType = buffer
+BufferType = buffer
 
 TupleType = tuple
 ListType = list
@@ -58,7 +57,10 @@ InstanceType = type(_x)
 MethodType = type(_x._m)
 
 BuiltinFunctionType = type(len)
-BuiltinMethodType = type([].append)     # Same as BuiltinFunctionType
+# Pyston change:
+# BuiltinMethodType = type([].append)     # Same as BuiltinFunctionType
+BuiltinMethodType = type((1.0).hex)     # Same as BuiltinFunctionType
+BuiltinCAPIFunctionType = type(reload)  # Pyston change: added this type
 
 ModuleType = type(sys)
 FileType = file
@@ -69,24 +71,22 @@ try:
 except TypeError:
     tb = sys.exc_info()[2]
     TracebackType = type(tb)
-    # Pyston change (we don't support tb_frame yet):
-    FrameType = type(sys._getframe(0))
-    # FrameType = type(tb.tb_frame)
+    FrameType = type(tb.tb_frame)
     del tb
 
 SliceType = slice
 EllipsisType = type(Ellipsis)
 
-# Pyston change: don't support this yet
-# DictProxyType = type(TypeType.__dict__)
+DictProxyType = type(TypeType.__dict__)
 NotImplementedType = type(NotImplemented)
 
 # Pyston change:
 AttrwrapperType = type(_C().__dict__)
 
 # For Jython, the following two types are identical
-# Pyston change: don't support these yet
-# GetSetDescriptorType = type(FunctionType.func_code)
+GetSetDescriptorType = type(FunctionType.func_code)
+# Pyston change:
 # MemberDescriptorType = type(FunctionType.func_globals)
+MemberDescriptorType = type(type.__dict__["__flags__"])
 
 del sys, _f, _g, _C, _x                           # Not for export

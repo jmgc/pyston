@@ -42,7 +42,7 @@ calliter_traverse(calliterobject *it, visitproc visit, void *arg)
 }
 
 // Pyston change: extract most of the body of calliter_iternext here
-// so we can use it from both calliter_iternext and calliter_hasnext
+// so we can use it from both calliter_iternext and calliterHasnextUnboxed
 PyObject *
 calliter_next(calliterobject *it)
 {
@@ -82,7 +82,7 @@ calliter_iternext(calliterobject *it)
     // Pyston change: for __hasnext__ based iteration, return the cached next value
     if (it->it_nextvalue != NULL) {
         PyObject* rv = it->it_nextvalue;
-        Py_CLEAR(it->it_nextvalue);
+        it->it_nextvalue = NULL;
         return rv;
     }
 

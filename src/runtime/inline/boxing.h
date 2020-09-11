@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ extern "C" inline bool unboxBool(Box* b) {
     // - the jit knows True is constant once the program starts
     // - this function will get inlined as well as boxBool
     // So in the presence of optimizations, I think this should do better:
-    return b == True;
+    return b == Py_True;
     // return static_cast<BoxedBool*>(b)->b;
 }
 }

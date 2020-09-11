@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,14 +20,15 @@
 namespace pyston {
 
 BoxedTupleIterator::BoxedTupleIterator(BoxedTuple* t) : t(t), pos(0) {
+    Py_INCREF(t);
 }
 
 Box* tupleIterIter(Box* s) {
-    return s;
+    return incref(s);
 }
 
-Box* tupleIter(Box* s) {
-    assert(isSubclass(s->cls, tuple_cls));
+Box* tupleIter(Box* s) noexcept {
+    assert(PyTuple_Check(s));
     BoxedTuple* self = static_cast<BoxedTuple*>(s);
     return new BoxedTupleIterator(self);
 }
@@ -36,23 +37,32 @@ Box* tupleiterHasnext(Box* s) {
     return boxBool(tupleiterHasnextUnboxed(s));
 }
 
-i1 tupleiterHasnextUnboxed(Box* s) {
+llvm_compat_bool tupleiterHasnextUnboxed(Box* s) {
     assert(s->cls == tuple_iterator_cls);
     BoxedTupleIterator* self = static_cast<BoxedTupleIterator*>(s);
 
     return self->pos < self->t->size();
 }
 
-Box* tupleiterNext(Box* s) {
+Box* tupleiter_next(Box* s) noexcept {
     assert(s->cls == tuple_iterator_cls);
     BoxedTupleIterator* self = static_cast<BoxedTupleIterator*>(s);
 
     if (!(self->pos >= 0 && self->pos < self->t->size())) {
-        raiseExcHelper(StopIteration, "");
+        return NULL;
     }
 
     Box* rtn = self->t->elts[self->pos];
     self->pos++;
+    Py_INCREF(rtn);
+    return rtn;
+}
+
+Box* tupleiterNext(Box* s) {
+    Box* rtn = tupleiter_next(s);
+    if (!rtn) {
+        raiseExcHelper(StopIteration, "");
+    }
     return rtn;
 }
 }

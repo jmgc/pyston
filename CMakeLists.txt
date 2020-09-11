@@ -8,6 +8,10 @@ include(ExternalProject)
 
 set(DEPS_DIR $ENV{HOME}/pyston_deps)
 
+if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Pyston does not support 32-bit systems yet")
+endif()
+
 # set build type to release by default
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
 if(NOT CMAKE_BUILD_TYPE)
@@ -15,6 +19,23 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 if(NOT ${CMAKE_BUILD_TYPE} STREQUAL "Release" AND NOT ${CMAKE_BUILD_TYPE} STREQUAL "Debug")
   message(FATAL_ERROR "CMAKE_BUILD_TYPE must be set to Release or Debug")
+endif()
+
+if(UNIX)
+  find_program(MAKE_PRG NAMES gmake make)
+  if(MAKE_PRG)
+    execute_process(
+      COMMAND "${MAKE_PRG}" --version
+      OUTPUT_VARIABLE MAKE_VERSION_INFO)
+    if(NOT "${OUTPUT_VARIABLE}" MATCHES ".*GNU.*")
+      unset(MAKE_PRG)
+    endif()
+  endif()
+  if(NOT MAKE_PRG)
+    message(FATAL_ERROR "GNU Make is required to build the dependencies.")
+  else()
+    message(STATUS "Found GNU Make at ${MAKE_PRG}")
+  endif()
 endif()
 
 option(ENABLE_CCACHE "enable caching compiler output" ON)
@@ -28,6 +49,11 @@ option(ENABLE_LLVM_DEBUG "LLVM debug symbols" OFF)
 option(ENABLE_OPROFILE "enable oprofile support" OFF)
 option(ENABLE_SELF_HOST "use pyston to test pyston" OFF)
 option(ENABLE_VALGRIND "pyston valgrind support" OFF)
+if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+  option(ENABLE_REF_DEBUG "enable memory and refcounting debugging" ON)
+else()
+  option(ENABLE_REF_DEBUG "enable memory and refcounting debugging" OFF)
+endif()
 
 option(ENABLE_PGO "enable -fprofile-generate/-fprofile-use" OFF)
 option(ENABLE_LTO "enable -flto" OFF)
@@ -65,7 +91,7 @@ else()
 endif()
 
 # initial clang flags (set here so they're used when building llvm)
-set(CLANG_FLAGS "-Qunused-arguments -fcolor-diagnostics -Wno-profile-instr-unprofiled" CACHE STRING "Clang specific C and CXX flags")
+set(CLANG_FLAGS "-Qunused-arguments -fcolor-diagnostics" CACHE STRING "Clang specific C and CXX flags")
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "Clang")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CLANG_FLAGS}")
 endif()
@@ -82,6 +108,12 @@ if(ENABLE_PGO)
     set(PROFILE_STATE "${PROFILE_STATE}=${PROFILE_DIR}")
   endif()
   set(PGO_FLAGS "-fprofile-${PROFILE_STATE} -fprofile-correction")
+endif()
+
+if(ENABLE_REF_DEBUG)
+ add_definitions(-DPy_REF_DEBUG)
+ add_definitions(-DPYMALLOC_DEBUG)
+ add_definitions(-DPy_TRACE_REFS)
 endif()
 
 macro(ADD_PROFILE_FLAGS)
@@ -104,7 +136,7 @@ if(${CMAKE_BUILD_TYPE} STREQUAL "Debug" AND NOT ENABLE_LLVM_DEBUG)
 endif()
 
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gitmodules
-                   COMMAND git submodule update --init
+                   COMMAND git submodule update --init build_deps
                    COMMAND cmake -E touch ${CMAKE_BINARY_DIR}/gitmodules
                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                    DEPENDS ${CMAKE_SOURCE_DIR}/.gitmodules)
@@ -112,38 +144,60 @@ add_custom_target(gitsubmodules DEPENDS ${CMAKE_BINARY_DIR}/gitmodules)
 
 # jemalloc
 ExternalProject_Add(libjemalloc
+                    BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/jemalloc/lib/libjemalloc.a
                     PREFIX jemalloc-build
-                    SOURCE_DIR ${CMAKE_SOURCE_DIR}/jemalloc
+                    SOURCE_DIR ${CMAKE_SOURCE_DIR}/build_deps/jemalloc
                     DEPENDS gitsubmodules
                     UPDATE_COMMAND autoconf
-                    CONFIGURE_COMMAND ${CMAKE_SOURCE_DIR}/jemalloc/configure --prefix=${CMAKE_BINARY_DIR}/jemalloc --enable-autogen --enable-prof-libunwind
-                    INSTALL_COMMAND make install_bin install_lib
+                    CONFIGURE_COMMAND ${CMAKE_SOURCE_DIR}/build_deps/jemalloc/configure --prefix=${CMAKE_BINARY_DIR}/jemalloc --enable-autogen --enable-prof --enable-prof-libunwind
+                    BUILD_COMMAND ${MAKE_PRG}
+                    INSTALL_COMMAND ${MAKE_PRG} install_bin install_lib
                     LOG_UPDATE ON
                     LOG_CONFIGURE ON
                     LOG_BUILD ON
                     LOG_INSTALL ON)
 
+#
+# CMake (<3.3) does not support BUILD_BYPRODUCTS.
+# This is a problem for ninja, which will not know how to build the generated file.
+# Here are a couple hacks to get around it:
+#
+# Add a copy step.  This just hides the dependency but it seems to work.
+# add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/jemalloc/lib/libjemalloc_copied.a DEPENDS libjemalloc COMMAND cp "${CMAKE_BINARY_DIR}/jemalloc/lib/libjemalloc.a" ${CMAKE_BINARY_DIR}/jemalloc/lib/libjemalloc_copied.a)
+# add_custom_target(libjemalloc_copied DEPENDS ${CMAKE_BINARY_DIR}/jemalloc/lib/libjemalloc_copied.a)
+#
+# Hack option #2: the existence of the custom target tells ninja that libjemalloc.a will get built somehow.
+# The name of the target doesn't matter.
+add_custom_target(libjemalloc_byproducts DEPENDS ${CMAKE_BINARY_DIR}/jemalloc/lib/libjemalloc.a)
+#
+# Hack option #3: delete the .so's and use `-ljemalloc` on the link line so that ninja doesn't know about the dependency.
+# ExternalProject_Add_Step(libjemalloc disable_shared
+# DEPENDEES install
+# COMMAND sh -c "rm -v ${CMAKE_BINARY_DIR}/jemalloc/lib/*.so*"
+# )
+
 execute_process(COMMAND cat llvm_revision.txt WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} OUTPUT_VARIABLE LLVMREV OUTPUT_STRIP_TRAILING_WHITESPACE)
 
 # llvm, clang, and libunwind patches
-add_custom_target(llvm_gotorev python ${CMAKE_SOURCE_DIR}/tools/git_svn_gotorev.py ${DEPS_DIR}/llvm-trunk ${LLVMREV} llvm_patches WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-add_custom_target(clang_gotorev python ${CMAKE_SOURCE_DIR}/tools/git_svn_gotorev.py ${DEPS_DIR}/llvm-trunk/tools/clang ${LLVMREV} clang_patches WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_custom_target(llvm_gotorev python2 ${CMAKE_SOURCE_DIR}/tools/git_svn_gotorev.py ${DEPS_DIR}/llvm-trunk ${LLVMREV} llvm_patches WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_custom_target(clang_gotorev python2 ${CMAKE_SOURCE_DIR}/tools/git_svn_gotorev.py ${DEPS_DIR}/llvm-trunk/tools/clang ${LLVMREV} clang_patches WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 add_custom_target(llvm_up DEPENDS llvm_gotorev clang_gotorev)
 
 set(LIBUNWIND_PATCHES
   ${CMAKE_SOURCE_DIR}/libunwind_patches/0001-pyston-add-lots-of-comments.patch
   ${CMAKE_SOURCE_DIR}/libunwind_patches/0002-pyston-stop-x86_64-setcontext-restoring-uninitialize.patch
   ${CMAKE_SOURCE_DIR}/libunwind_patches/0003-use-a-sorted-array-for-registered-objects-and-do-a-b.patch
+  ${CMAKE_SOURCE_DIR}/libunwind_patches/0004-disable-libunwind-doc-generation.patch
   ${CMAKE_SOURCE_DIR}/libunwind_patches/9999-is-patched-marker.patch
 )
 
-add_custom_command(OUTPUT ${CMAKE_SOURCE_DIR}/libunwind/pyston_patched
-                   COMMAND git submodule update libunwind
-                   COMMAND python ${CMAKE_SOURCE_DIR}/tools/git_am_automated.py libunwind ${LIBUNWIND_PATCHES}
+add_custom_command(OUTPUT ${CMAKE_SOURCE_DIR}/build_deps/libunwind/pyston_patched
+                   COMMAND git submodule update build_deps/libunwind
+                   COMMAND python2 ${CMAKE_SOURCE_DIR}/tools/git_am_automated.py build_deps/libunwind ${LIBUNWIND_PATCHES}
                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                    DEPENDS ${LIBUNWIND_PATCHES}
                    DEPENDS gitsubmodules)
-add_custom_target(libunwind_patched DEPENDS ${CMAKE_SOURCE_DIR}/libunwind/pyston_patched)
+add_custom_target(libunwind_patched DEPENDS ${CMAKE_SOURCE_DIR}/build_deps/libunwind/pyston_patched)
 
 # llvm
 set(LLVM_TARGETS_TO_BUILD "host" CACHE STRING "LLVM targets")
@@ -168,18 +222,19 @@ else()
   set(LIBUNWIND_CONSERVATIVE_CHECKS "--disable-conservative-checks")
 endif()
 ExternalProject_Add(libunwind
-                    PREFIX libunwind
-                    SOURCE_DIR ${CMAKE_SOURCE_DIR}/libunwind
+                    PREFIX build_deps/libunwind
+                    SOURCE_DIR ${CMAKE_SOURCE_DIR}/build_deps/libunwind
                     DEPENDS libunwind_patched
                     UPDATE_COMMAND autoreconf -i
-                    CONFIGURE_COMMAND ${CMAKE_SOURCE_DIR}/libunwind/configure ${LIBUNWIND_DEBUG_CFLAGS} --prefix=${CMAKE_BINARY_DIR}/libunwind --enable-shared=0 --disable-block-signals ${LIBUNWIND_CONSERVATIVE_CHECKS} ${LIBUNWIND_DEBUG} ${LIBUNWIND_DEBUG_FRAME}
+                    CONFIGURE_COMMAND ${CMAKE_SOURCE_DIR}/build_deps/libunwind/configure ${LIBUNWIND_DEBUG_CFLAGS} --prefix=${CMAKE_BINARY_DIR}/build_deps/libunwind --enable-shared=0 --disable-block-signals ${LIBUNWIND_CONSERVATIVE_CHECKS} ${LIBUNWIND_DEBUG} ${LIBUNWIND_DEBUG_FRAME}
+                    BUILD_COMMAND ${MAKE_PRG} -j${TEST_THREADS}
                     LOG_UPDATE ON
                     LOG_CONFIGURE ON
                     LOG_BUILD ON
                     LOG_INSTALL ON)
 # Tell CMake that patching libunwind means that we need to rebuild it:
 ExternalProject_Add_Step(libunwind forcebuild
-    DEPENDS ${CMAKE_SOURCE_DIR}/libunwind/pyston_patched
+    DEPENDS ${CMAKE_SOURCE_DIR}/build_deps/libunwind/pyston_patched
     DEPENDERS build
 )
 # Tell CMake that rebuilding libunwind will touch the build files (why doesn't it know this??)
@@ -187,15 +242,11 @@ ExternalProject_Add_Step(libunwind forcebuild
 # it will take another build to realize that any source files that #include libunwind.h
 # need to get rebuilt.
 SET_SOURCE_FILES_PROPERTIES(
-    ${CMAKE_BINARY_DIR}/libunwind/include/libunwind.h PROPERTIES OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/libunwind/pyston_patched
+    ${CMAKE_BINARY_DIR}/build_deps/libunwind/include/libunwind.h PROPERTIES OBJECT_DEPENDS ${CMAKE_SOURCE_DIR}/build_deps/libunwind/pyston_patched
 )
 
-# libpypa
-add_subdirectory(libpypa EXCLUDE_FROM_ALL)
-add_dependencies(pypa gitsubmodules)
-
 # lz4
-add_subdirectory(lz4/cmake_unofficial EXCLUDE_FROM_ALL)
+add_subdirectory(build_deps/lz4/cmake_unofficial EXCLUDE_FROM_ALL)
 add_dependencies(lz4 gitsubmodules)
 
 # valgrind
@@ -238,16 +289,17 @@ add_definitions(${LLVM_DEFINITIONS})
 add_definitions(-DDEFAULT_PYTHON_MAJOR_VERSION=2 -DDEFAULT_PYTHON_MINOR_VERSION=7 -DDEFAULT_PYTHON_MICRO_VERSION=6) # Python 2.7.6
 add_definitions(-DLLVMREV=${LLVMREV})
 
-include_directories(${CMAKE_BINARY_DIR}/from_cpython/Include)
+include_directories(${CMAKE_BINARY_DIR}/include/python2.7)
 include_directories(${LLVM_INCLUDE_DIRS})
 
 find_package(LibLZMA REQUIRED)
-link_directories(${CMAKE_BINARY_DIR}/libunwind/lib)
+link_directories(${CMAKE_BINARY_DIR}/build_deps/libunwind/lib)
 link_directories(${LLVM_LIBRARY_DIRS})
 
 ADD_PROFILE_FLAGS()
 
-add_subdirectory(lib_pyston)
+include(sysconfigdata)
+
 add_subdirectory(from_cpython)
 add_subdirectory(src)
 add_subdirectory(test/test_extension)
@@ -259,16 +311,11 @@ add_subdirectory(tools)
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/linkdeps_dummy.c COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/linkdeps_dummy.c DEPENDS ${CMAKE_SOURCE_DIR}/section_ordering.txt)
 
 add_executable(pyston $<TARGET_OBJECTS:PYSTON_MAIN_OBJECT> $<TARGET_OBJECTS:PYSTON_OBJECTS> $<TARGET_OBJECTS:FROM_CPYTHON> linkdeps_dummy.c)
+add_custom_command(TARGET pyston POST_BUILD COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_BINARY_DIR}/pyston ${CMAKE_BINARY_DIR}/python DEPENDS pyston)
+
 # Wrap the stdlib in --whole-archive to force all the symbols to be included and eventually exported
-target_link_libraries(pyston -Wl,--whole-archive stdlib -Wl,--no-whole-archive pthread m z readline sqlite3 gmp ssl crypto unwind pypa liblz4 double-conversion ${LLVM_LIBS} ${LIBLZMA_LIBRARIES} ${OPTIONAL_LIBRARIES} -L${CMAKE_BINARY_DIR}/jemalloc/lib -Wl,-rpath,${CMAKE_BINARY_DIR}/jemalloc/lib jemalloc)
+target_link_libraries(pyston -Wl,--whole-archive stdlib -Wl,--no-whole-archive pthread m z readline sqlite3 gmp mpfr ssl crypto liblz4 util ${LLVM_LIBS} ${LIBLZMA_LIBRARIES} ${OPTIONAL_LIBRARIES} ${CMAKE_BINARY_DIR}/jemalloc/lib/libjemalloc.a unwind)
 add_dependencies(pyston libjemalloc)
-
-# copy src/codegen/parse_ast.py to the build directory
-add_custom_command(TARGET pyston POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/src/codegen/parse_ast.py ${CMAKE_BINARY_DIR}/src/codegen/parse_ast.py)
-
-add_custom_target(astcompare COMMAND ${CMAKE_SOURCE_DIR}/tools/astprint_test.sh
-                  DEPENDS astprint
-                  COMMENT "Running libpypa vs CPython AST result comparison test")
 
 # test
 enable_testing()
@@ -277,36 +324,35 @@ set(PYTHONIOENCODING utf-8)
 
 add_test(NAME lint COMMAND ${PYTHON_EXE} ${CMAKE_SOURCE_DIR}/tools/lint.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME check-format COMMAND ${CMAKE_SOURCE_DIR}/tools/check_format.sh ${LLVM_TOOLS_BINARY_DIR}/clang-format WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
-add_test(NAME gc_unittest COMMAND gc_unittest)
 add_test(NAME analysis_unittest COMMAND analysis_unittest)
 
 macro(add_pyston_test testname directory)
-  add_test(NAME pyston_${testname}_${directory} COMMAND ${PYTHON_EXE} ${CMAKE_SOURCE_DIR}/tools/tester.py -R ./pyston -j${TEST_THREADS} -k -a=-S ${ARGV2} ${ARGV3} ${ARGV4} ${CMAKE_SOURCE_DIR}/test/${directory})
+  add_test(NAME pyston_${testname}_${directory} COMMAND ${PYTHON_EXE} ${CMAKE_SOURCE_DIR}/tools/tester.py -R ./pyston -j${TEST_THREADS} -q -k -a=-S ${ARGV2} ${ARGV3} ${ARGV4} ${CMAKE_SOURCE_DIR}/test/${directory})
 endmacro()
 
 # tests         testname directory arguments
-add_pyston_test(defaults tests --order-by-mtime)
-add_pyston_test(old_parser tests -a=-n -a=-x -t50)
+add_pyston_test(defaults tests --order-by-mtime -t50)
+add_pyston_test(force_llvm tests -a=-n -t90)
 if(${CMAKE_BUILD_TYPE} STREQUAL "Release")
-  add_pyston_test(max_compilation_tier tests -a=-O -a=-x -t50)
+  add_pyston_test(max_compilation_tier tests -a=-L -t50)
 endif()
-add_pyston_test(defaults cpython --exit-code-only --skip-failing -t50)
-add_pyston_test(defaults integration --exit-code-only --skip-failing -t600)
+add_pyston_test(defaults cpython --exit-code-only --skip-failing -t100)
+add_pyston_test(defaults integration --exit-code-only --skip-failing -t900)
 if(ENABLE_EXTRA_TESTS)
-  add_pyston_test(defaults extra -t600 --exit-code-only)
+  add_pyston_test(defaults extra -t900 --exit-code-only)
 endif()
 
 
 # format
 file(GLOB_RECURSE FORMAT_FILES ${CMAKE_SOURCE_DIR}/src/*.h ${CMAKE_SOURCE_DIR}/src/*.cpp)
-add_custom_target(format ${LLVM_TOOLS_BINARY_DIR}/clang-format -style=file -i ${FORMAT_FILES} DEPENDS clang-format WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
+add_custom_target(format ${CMAKE_SOURCE_DIR}/tools/do_format.sh ${LLVM_TOOLS_BINARY_DIR}/clang-format DEPENDS clang-format WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 add_custom_target(check-format ${CMAKE_SOURCE_DIR}/tools/check_format.sh ${LLVM_TOOLS_BINARY_DIR}/clang-format DEPENDS clang-format WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # lint
 add_custom_target(lint ${PYTHON_EXE} ${CMAKE_SOURCE_DIR}/tools/lint.py WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
 
 # check
-add_custom_target(check-deps DEPENDS pyston copy_stdlib copy_libpyston clang-format ext_cpython ext_pyston unittests sharedmods)
+add_custom_target(check-deps DEPENDS pyston copy_stdlib clang-format ext_cpython ext_pyston unittests sharedmods)
 add_custom_target(check-pyston COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure DEPENDS check-deps)
 
 # {run,dbg,perf,memcheck,memleaks,cachegrind}_TESTNAME
@@ -334,5 +380,34 @@ else()
   add_custom_target(docs COMMAND ${CMAKE_COMMAND} -E echo "Can't create docs, doxygen not installed \(try sudo apt-get install doxygen grpahviz on Ubuntu and then rerun cmake\)" VERBATIM)
 endif()
 
+add_subdirectory(plugins/refcount_checker EXCLUDE_FROM_ALL)
+
+
+# CPack config.  I think this needs to come after any other code, since it will
+# look at whatever install targets have already been set up.
+
+set(CPACK_GENERATOR "TGZ")
+
+set(CMAKE_EXECUTABLE_FORMAT "ELF") # Otherwise cmake thinks this is a cross-compile
+install(TARGETS pyston DESTINATION ".")
+
+set(CPACK_PACKAGE_VERSION_MAJOR "0")
+set(CPACK_PACKAGE_VERSION_MINOR "7")
+set(CPACK_PACKAGE_VERSION_PATCH "0")
+
+set(CPACK_SYSTEM_NAME "linux64")
+
+set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_SOURCE_DIR}/LICENSE)
+set(CPACK_PACKAGE_DESCRIPTION_FILE ${CMAKE_SOURCE_DIR}/README.md)
+
+install(FILES LICENSE README.md DESTINATION ".")
+
+install(FILES test/lib/virtualenv/virtualenv.py DESTINATION virtualenv)
+install(FILES test/lib/virtualenv/virtualenv_support/pip-6.0.8-py2.py3-none-any.whl DESTINATION virtualenv/virtualenv_support)
+install(FILES test/lib/virtualenv/virtualenv_support/setuptools-12.0.5-py2.py3-none-any.whl DESTINATION virtualenv/virtualenv_support)
+
+include(CPack)
+
+
 # last file added (need to change this if we add a file that is added via a glob):
-# from_cpython/Lib/test/test_re.py
+# from_cpython/Include/genobject.h

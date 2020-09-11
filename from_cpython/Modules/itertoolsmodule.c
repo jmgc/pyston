@@ -405,7 +405,7 @@ static void
 teedataobject_safe_decref(PyObject *obj)
 {
     while (obj && Py_TYPE(obj) == &teedataobject_type &&
-           2 /*Pyston change, was: Py_REFCNT(obj)*/ == 1) {
+           Py_REFCNT(obj) == 1) {
         PyObject *nextlink = ((teedataobject *)obj)->nextlink;
         ((teedataobject *)obj)->nextlink = NULL;
         Py_DECREF(obj);
@@ -1942,7 +1942,7 @@ product_next(productobject *lz)
         Py_ssize_t *indices = lz->indices;
 
         /* Copy the previous result tuple or re-use it if available */
-        if (2 /*Pyston change, was: Py_REFCNT(result)*/ > 1) {
+        if (Py_REFCNT(result) > 1) {
             PyObject *old_result = result;
             result = PyTuple_New(npools);
             if (result == NULL)
@@ -1956,7 +1956,7 @@ product_next(productobject *lz)
             Py_DECREF(old_result);
         }
         /* Now, we've got the only copy so we can update it in-place */
-        assert (npools==0 || 2 /*Pyston change, was: Py_REFCNT(result)*/ == 1);
+        assert (npools==0 || Py_REFCNT(result) == 1);
 
         /* Update the pool indices right-to-left.  Only advance to the
            next pool when the previous one rolls-over */
@@ -2170,7 +2170,7 @@ combinations_next(combinationsobject *co)
         }
     } else {
         /* Copy the previous result tuple or re-use it if available */
-        if (2 /*Pyston change, was: Py_REFCNT(result)*/ > 1) {
+        if (Py_REFCNT(result) > 1) {
             PyObject *old_result = result;
             result = PyTuple_New(r);
             if (result == NULL)
@@ -2187,7 +2187,7 @@ combinations_next(combinationsobject *co)
          * CPython's empty tuple is a singleton and cached in
          * PyTuple's freelist.
          */
-        assert(r == 0 || 2 /*Pyston change, was: Py_REFCNT(result)*/ == 1);
+        assert(r == 0 || Py_REFCNT(result) == 1);
 
         /* Scan indices right-to-left until finding one that is not
            at its maximum (i + n - r). */
@@ -2419,7 +2419,7 @@ cwr_next(cwrobject *co)
         }
     } else {
         /* Copy the previous result tuple or re-use it if available */
-        if (2 /*Pyston change, was: Py_REFCNT(result)*/ > 1) {
+        if (Py_REFCNT(result) > 1) {
             PyObject *old_result = result;
             result = PyTuple_New(r);
             if (result == NULL)
@@ -2434,7 +2434,7 @@ cwr_next(cwrobject *co)
         }
         /* Now, we've got the only copy so we can update it in-place CPython's
            empty tuple is a singleton and cached in PyTuple's freelist. */
-        assert(r == 0 || 2 /*Pyston change, was: Py_REFCNT(result)*/ == 1);
+        assert(r == 0 || Py_REFCNT(result) == 1);
 
     /* Scan indices right-to-left until finding one that is not
      * at its maximum (n-1). */
@@ -2682,7 +2682,7 @@ permutations_next(permutationsobject *po)
             goto empty;
 
         /* Copy the previous result tuple or re-use it if available */
-        if (2 /*Pyston change, was: Py_REFCNT(result)*/ > 1) {
+        if (Py_REFCNT(result) > 1) {
             PyObject *old_result = result;
             result = PyTuple_New(r);
             if (result == NULL)
@@ -2696,7 +2696,7 @@ permutations_next(permutationsobject *po)
             Py_DECREF(old_result);
         }
         /* Now, we've got the only copy so we can update it in-place */
-        assert(r == 0 || 2 /*Pyston change, was: Py_REFCNT(result)*/ == 1);
+        assert(r == 0 || Py_REFCNT(result) == 1);
 
         /* Decrement rightmost cycle, moving leftward upon zero rollover */
         for (i=r-1 ; i>=0 ; i--) {
@@ -3583,7 +3583,7 @@ izip_next(izipobject *lz)
 
     if (tuplesize == 0)
         return NULL;
-    if (2 /*Pyston change, was: Py_REFCNT(result)*/ == 1) {
+    if (Py_REFCNT(result) == 1) {
         Py_INCREF(result);
         for (i=0 ; i < tuplesize ; i++) {
             it = PyTuple_GET_ITEM(lz->ittuple, i);
@@ -3683,14 +3683,17 @@ repeat_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
     repeatobject *ro;
     PyObject *element;
-    Py_ssize_t cnt = -1;
+    Py_ssize_t cnt = -1, n_kwds = 0;
     static char *kwargs[] = {"object", "times", NULL};
 
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|n:repeat", kwargs,
                                      &element, &cnt))
         return NULL;
 
-    if (PyTuple_Size(args) == 2 && cnt < 0)
+    if (kwds != NULL)
+        n_kwds = PyDict_Size(kwds);
+    /* Does user supply times argument? */
+    if ((PyTuple_Size(args) + n_kwds == 2) && cnt < 0)
         cnt = 0;
 
     ro = (repeatobject *)type->tp_alloc(type, 0);
@@ -3928,7 +3931,7 @@ izip_longest_next(iziplongestobject *lz)
         return NULL;
     if (lz->numactive == 0)
         return NULL;
-    if (2 /*Pyston change, was: Py_REFCNT(result)*/ == 1) {
+    if (Py_REFCNT(result) == 1) {
         Py_INCREF(result);
         for (i=0 ; i < tuplesize ; i++) {
             it = PyTuple_GET_ITEM(lz->ittuple, i);
@@ -4079,34 +4082,6 @@ static PyMethodDef module_methods[] = {
     {"tee",     (PyCFunction)tee,       METH_VARARGS, tee_doc},
     {NULL,              NULL}           /* sentinel */
 };
-
-// Pyston change: These are types defined in this file that I manually
-// checked. The ones that aren't commented out have a `tp_dealloc` that
-// doesn't do anything in Pyston as we switched to garbage collection and
-// the finalizer logic in Pyston wants to know that for optimization purposes.
-PyTypeObject* Itertool_SafeDealloc_Types[] = {
-    // &combinations_type,
-    // &cwr_type,
-    &cycle_type,
-    &dropwhile_type,
-    &takewhile_type,
-    &islice_type,
-    &starmap_type,
-    &imap_type,
-    &chain_type,
-    &compress_type,
-    &ifilter_type,
-    &ifilterfalse_type,
-    &count_type,
-    &izip_type,
-    &iziplongest_type,
-    // &permutations_type,
-    // &product_type,
-    &repeat_type,
-    &groupby_type,
-    NULL
-};
-
 
 PyMODINIT_FUNC
 inititertools(void)

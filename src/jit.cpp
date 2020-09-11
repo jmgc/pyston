@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
+#include <limits.h>
 #include <readline/history.h>
 #include <readline/readline.h>
 #include <stdint.h>
@@ -30,6 +31,7 @@
 #include "llvm/Support/Signals.h"
 
 #include "osdefs.h"
+#include "patchlevel.h"
 
 #include "asm_writing/disassemble.h"
 #include "capi/types.h"
@@ -180,42 +182,47 @@ static void enableGdbSegfaultWatcher() {
 }
 
 int handleArg(char code) {
-    if (code == 'O')
+    if (code == 'O') {
+        Py_OptimizeFlag++;
+    } else if (code == 'L') {
         FORCE_OPTIMIZE = true;
-    else if (code == 't')
-        TRAP = true;
-    else if (code == 'q')
+    } else if (code == 'q')
         GLOBAL_VERBOSITY = 0;
-    else if (code == 'v')
+    else if (code == 'v') {
+        if (GLOBAL_VERBOSITY)
+            Py_VerboseFlag++;
         GLOBAL_VERBOSITY++;
-    else if (code == 'd')
+    } else if (code == 'd')
         SHOW_DISASM = true;
     else if (code == 'I')
         FORCE_INTERPRETER = true;
-    else if (code == 'i')
+    else if (code == 'i') {
         Py_InspectFlag = true;
-    else if (code == 'n') {
+        Py_InteractiveFlag = true;
+    } else if (code == 'n') {
         ENABLE_INTERPRETER = false;
     } else if (code == 'a') {
-        ASSEMBLY_LOGGING = true;
+        LOG_IC_ASSEMBLY = true;
     } else if (code == 'p') {
         PROFILE = true;
     } else if (code == 'j') {
         DUMPJIT = true;
-    } else if (code == 's') {
+    } else if (code == 'T') {
         Stats::setEnabled(true);
     } else if (code == 'S') {
         Py_NoSiteFlag = 1;
+    } else if (code == 'U') {
+        Py_UnicodeFlag++;
     } else if (code == 'u') {
         unbuffered = true;
     } else if (code == 'r') {
         USE_STRIPPED_STDLIB = true;
     } else if (code == 'b') {
         USE_REGALLOC_BASIC = false;
-    } else if (code == 'x') {
-        ENABLE_PYPA_PARSER = false;
     } else if (code == 'E') {
         Py_IgnoreEnvironmentFlag = 1;
+    } else if (code == 'B') {
+        Py_DontWriteBytecodeFlag++;
     } else if (code == 'P') {
         PAUSE_AT_ABORT = true;
     } else if (code == 'F') {
@@ -265,8 +272,31 @@ static int RunModule(const char* module, int set_argv0) {
     return 0;
 }
 
+static int RunMainFromImporter(const char* filename) {
+    PyObject* argv0 = NULL, * importer = NULL;
 
-static int main(int argc, char** argv) {
+    if ((argv0 = PyString_FromString(filename)) && (importer = PyImport_GetImporter(argv0))
+        && (importer->cls != &PyNullImporter_Type)) {
+        /* argv0 is usable as an import source, so
+               put it in sys.path[0] and import __main__ */
+        PyObject* sys_path = NULL;
+        if ((sys_path = PySys_GetObject("path")) && !PyList_SetItem(sys_path, 0, argv0)) {
+            Py_INCREF(argv0);
+            Py_DECREF(importer);
+            sys_path = NULL;
+            return RunModule("__main__", 0) != 0;
+        }
+    }
+    Py_XDECREF(argv0);
+    Py_XDECREF(importer);
+    if (PyErr_Occurred()) {
+        PyErr_Print();
+        return 1;
+    }
+    return -1;
+}
+
+static int main(int argc, char** argv) noexcept {
     argv0 = argv[0];
 
     Timer _t("for jit startup");
@@ -301,7 +331,7 @@ static int main(int argc, char** argv) {
 
         // Suppress getopt errors so we can throw them ourselves
         opterr = 0;
-        while ((code = getopt(argc, argv, "+:OqdIibpjtrsSvnxEac:FuPTGm:")) != -1) {
+        while ((code = getopt(argc, argv, "+:OLqdIibpjtrTRSUvnxXEBac:FuPTGm:")) != -1) {
             if (code == 'c') {
                 assert(optarg);
                 command = optarg;
@@ -311,6 +341,9 @@ static int main(int argc, char** argv) {
                 assert(optarg);
                 module = optarg;
                 // no more option parsing; the rest of our arguments go into sys.argv.
+                break;
+            } else if (code == 'R') {
+                Py_HashRandomizationFlag = 1;
                 break;
             } else if (code == ':') {
                 fprintf(stderr, "Argument expected for the -%c option\n", optopt);
@@ -324,13 +357,18 @@ static int main(int argc, char** argv) {
                     return r;
             }
         }
+        /* The variable is only tested for existence here; _PyRandom_Init will
+           check its value further. */
+        char* p;
+        if (!Py_HashRandomizationFlag && (p = Py_GETENV("PYTHONHASHSEED")) && *p != '\0')
+            Py_HashRandomizationFlag = 1;
 
+        _PyRandom_Init();
         Stats::startEstimatingCPUFreq();
 
         const char* fn = NULL;
 
         threading::registerMainThread();
-        threading::acquireGLRead();
 
         Py_SetProgramName(argv[0]);
 
@@ -340,13 +378,25 @@ static int main(int argc, char** argv) {
             setvbuf(stderr, (char*)NULL, _IONBF, BUFSIZ);
         }
 
-        if (ASSEMBLY_LOGGING) {
+#ifdef SIGPIPE
+        PyOS_setsig(SIGPIPE, SIG_IGN);
+#endif
+#ifdef SIGXFZ
+        PyOS_setsig(SIGXFZ, SIG_IGN);
+#endif
+#ifdef SIGXFSZ
+        PyOS_setsig(SIGXFSZ, SIG_IGN);
+#endif
+
+#ifndef NDEBUG
+        if (LOG_IC_ASSEMBLY || LOG_BJIT_ASSEMBLY) {
             assembler::disassemblyInitialize();
         }
+#endif
 
         {
-            Timer _t("for initCodegen");
-            initCodegen();
+            Timer _t("for Py_Initialize");
+            Py_Initialize();
         }
 
         // Arguments left over after option parsing are of the form:
@@ -387,10 +437,13 @@ static int main(int argc, char** argv) {
 
         if (!Py_NoSiteFlag) {
             try {
-                std::string module_name = "site";
-                importModuleLevel(module_name, None, None, 0);
+                Box* module = PyImport_ImportModule("site");
+                if (!module)
+                    throwCAPIException();
+                Py_DECREF(module);
             } catch (ExcInfo e) {
                 e.printExcAndTraceback();
+                e.clear();
                 return 1;
             }
         }
@@ -408,23 +461,31 @@ static int main(int argc, char** argv) {
         // if the user invoked `pyston -c command`
         if (command != NULL) {
             try {
-                main_module = createModule("__main__", "<string>");
-                AST_Module* m = parse_string(command);
+                main_module = createModule(autoDecref(boxString("__main__")), "<string>");
+                AST_Module* m;
+                std::unique_ptr<ASTAllocator> ast_allocator;
+                std::tie(m, ast_allocator) = parse_string(command, /* future_flags = */ 0);
                 compileAndRunModule(m, main_module);
                 rtncode = 0;
             } catch (ExcInfo e) {
                 setCAPIException(e);
                 PyErr_Print();
+                PyErr_Clear();
                 rtncode = 1;
             }
         } else if (module != NULL) {
             // TODO: CPython uses the same main module for all code paths
-            main_module = createModule("__main__", "<string>");
+            main_module = createModule(autoDecref(boxString("__main__")), "<string>");
             rtncode = (RunModule(module, 1) != 0);
         } else {
+            main_module = createModule(autoDecref(boxString("__main__")), fn ? fn : "<stdin>");
             rtncode = 0;
             if (fn != NULL) {
-                llvm::SmallString<128> path;
+                rtncode = RunMainFromImporter(fn);
+            }
+
+            if (rtncode == -1 && fn != NULL) {
+                llvm::SmallString<PATH_MAX> path;
 
                 if (!llvm::sys::fs::exists(fn)) {
                     fprintf(stderr, "[Errno 2] No such file or directory: '%s'\n", fn);
@@ -446,78 +507,46 @@ static int main(int argc, char** argv) {
                 prependToSysPath(real_path);
                 free(real_path);
 
-                main_module = createModule("__main__", fn);
                 try {
-                    AST_Module* ast = caching_parse_file(fn);
+                    std::unique_ptr<ASTAllocator> ast_allocator;
+                    AST_Module* ast;
+                    std::tie(ast, ast_allocator) = parse_file(fn, /* future_flags = */ 0);
+
                     compileAndRunModule(ast, main_module);
+                    rtncode = 0;
                 } catch (ExcInfo e) {
                     setCAPIException(e);
                     PyErr_Print();
+                    PyErr_Clear();
                     rtncode = 1;
                 }
             }
         }
 
         if (Py_InspectFlag || !(command || fn || module)) {
-            printf("Pyston v%d.%d (rev " STRINGIFY(GITREV) ")", PYSTON_VERSION_MAJOR, PYSTON_VERSION_MINOR);
-            printf(", targeting Python %d.%d.%d\n", PYTHON_VERSION_MAJOR, PYTHON_VERSION_MINOR, PYTHON_VERSION_MICRO);
+
+            PyObject* v = PyImport_ImportModule("readline");
+            if (!v)
+                PyErr_Clear();
+            else
+                Py_CLEAR(v);
+
+            printf("Pyston v%d.%d.%d (rev " STRINGIFY(GITREV) ")", PYSTON_VERSION_MAJOR, PYSTON_VERSION_MINOR,
+                   PYSTON_VERSION_MICRO);
+            printf(", targeting Python %d.%d.%d\n", PY_MAJOR_VERSION, PY_MINOR_VERSION, PY_MICRO_VERSION);
 
             Py_InspectFlag = 0;
 
-            if (!main_module) {
-                main_module = createModule("__main__", "<stdin>");
-            } else {
-                // main_module->fn = "<stdin>";
-            }
-
-            for (;;) {
-                char* line = readline(">> ");
-                if (!line)
-                    break;
-
-                add_history(line);
-
-                try {
-                    AST_Module* m = parse_string(line);
-
-                    Timer _t("repl");
-
-                    if (m->body.size() > 0 && m->body[0]->type == AST_TYPE::Expr) {
-                        AST_Expr* e = ast_cast<AST_Expr>(m->body[0]);
-                        AST_Call* c = new AST_Call();
-                        AST_Name* r = new AST_Name(m->interned_strings->get("repr"), AST_TYPE::Load, 0);
-                        c->func = r;
-                        c->starargs = NULL;
-                        c->kwargs = NULL;
-                        c->args.push_back(e->value);
-                        c->lineno = 0;
-
-                        AST_Print* p = new AST_Print();
-                        p->dest = NULL;
-                        p->nl = true;
-                        p->values.push_back(c);
-                        p->lineno = 0;
-                        m->body[0] = p;
-                    }
-
-                    compileAndRunModule(m, main_module);
-                } catch (ExcInfo e) {
-                    setCAPIException(e);
-                    PyErr_Print();
-                }
-            }
+            PyCompilerFlags cf;
+            cf.cf_flags = 0;
+            rtncode = PyRun_InteractiveLoopFlags(stdin, "<stdin>", &cf);
         }
 
         threading::finishMainThread();
 
-        // Acquire the GIL to make sure we stop the other threads, since we will tear down
-        // data structures they are potentially running on.
-        // Note: we will purposefully not release the GIL on exiting.
-        threading::promoteGL();
+        _t.split("Py_Finalize");
 
-        _t.split("joinRuntime");
-
-        joinRuntime();
+        Py_Finalize();
         _t.split("finishing up");
 
 #if STAT_TIMERS

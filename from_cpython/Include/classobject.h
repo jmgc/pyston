@@ -58,14 +58,25 @@ PyAPI_DATA(PyTypeObject*) instancemethod_cls;
 #define PyMethod_Check(op) (Py_TYPE(op) == &PyMethod_Type)
 
 PyAPI_FUNC(PyObject *) PyClass_New(PyObject *, PyObject *, PyObject *) PYSTON_NOEXCEPT;
+
+// Pyston change: pyston addition returns PyClassObject->cl_name
+PyAPI_FUNC(BORROWED(PyObject *)) PyClass_Name(PyObject *) PYSTON_NOEXCEPT;
+
 PyAPI_FUNC(PyObject *) PyInstance_New(PyObject *, PyObject *,
                                             PyObject *) PYSTON_NOEXCEPT;
+
 PyAPI_FUNC(PyObject *) PyInstance_NewRaw(PyObject *, PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyMethod_New(PyObject *, PyObject *, PyObject *) PYSTON_NOEXCEPT;
+
+// Pyston change: pyston addition returns PyInstanceObject->in_class
+PyAPI_FUNC(BORROWED(PyObject*)) PyInstance_Class(PyObject* _inst) PYSTON_NOEXCEPT;
 
 PyAPI_FUNC(PyObject *) PyMethod_Function(PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyMethod_Self(PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyMethod_Class(PyObject *) PYSTON_NOEXCEPT;
+
+// Pyston change: add help API to allow extensions to set the fields of PyMethodObject
+ PyAPI_FUNC(int) PyMethod_SetSelf(PyObject *, PyObject*) PYSTON_NOEXCEPT;
 
 /* Look up attribute with name (a string) on instance object pinst, using
  * only the instance and base class dicts.  If a descriptor is found in
@@ -77,7 +88,7 @@ PyAPI_FUNC(PyObject *) PyMethod_Class(PyObject *) PYSTON_NOEXCEPT;
  * can't fail, never sets an exception, and NULL is not an error (it just
  * means "not found").
  */
-PyAPI_FUNC(PyObject *) _PyInstance_Lookup(PyObject *pinst, PyObject *name) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject *)) _PyInstance_Lookup(PyObject *pinst, PyObject *name) PYSTON_NOEXCEPT;
 
 // Pyston change: no longer macros
 #if 0
@@ -103,4 +114,3 @@ PyAPI_FUNC(int) PyMethod_ClearFreeList(void) PYSTON_NOEXCEPT;
 }
 #endif
 #endif /* !Py_CLASSOBJECT_H */
-

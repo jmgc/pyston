@@ -161,11 +161,19 @@ cleanup_buffer(PyObject *self)
     }
 }
 
+// A special cleanup "list" that specifies that we don't need to keep track of cleanups.
+// This is useful for vgetsingle, where there are no partial-failure cases that require
+// keeping track of cleanups.
+#define NOCLEANUP ((PyObject**)1)
+
 static int
 addcleanup(void *ptr, PyObject **freelist, PyCapsule_Destructor destr)
 {
     PyObject *cobj;
     const char *name;
+
+    if (freelist == NOCLEANUP)
+        return 0;
 
     if (!*freelist) {
         *freelist = PyList_New(0);
@@ -569,22 +577,15 @@ float_argument_error(PyObject *arg)
         return 0;
 }
 
-int _PyArg_ParseSingle_SizeT(PyObject* obj, int arg_idx, const char* fname, const char* format, ...) {
-    va_list va;
+int vgetsingle(PyObject* obj, int arg_idx, const char* fname, const char* format, va_list *v_pa, int flags) {
     char* msg;
     char msgbuf[256];
 
     assert(format[0] != '\0');
     assert(format[0] != '(');
     assert(format[0] != '|');
-    assert(format[0] != '|');
 
-    assert(format[1] != '*'); // would need to pass a non-null freelist
-    assert(format[0] != 'e'); // would need to pass a non-null freelist
-
-    va_start(va, format);
-    msg = convertsimple(obj, &format, &va, FLAG_SIZE_T, msgbuf, sizeof(msgbuf), NULL);
-    va_end(va);
+    msg = convertsimple(obj, &format, v_pa, flags, msgbuf, sizeof(msgbuf), NOCLEANUP);
 
     if (msg) {
         int levels[1];
@@ -597,6 +598,28 @@ int _PyArg_ParseSingle_SizeT(PyObject* obj, int arg_idx, const char* fname, cons
     assert(format[0] == '\0');
     return 1;
 }
+
+int PyArg_ParseSingle(PyObject* obj, int arg_idx, const char* fname, const char* format, ...) {
+    va_list va;
+    va_start(va, format);
+
+    int r = vgetsingle(obj, arg_idx, fname, format, &va, 0);
+
+    va_end(va);
+    return r;
+}
+
+int _PyArg_ParseSingle_SizeT(PyObject* obj, int arg_idx, const char* fname, const char* format, ...) {
+    va_list va;
+    va_start(va, format);
+
+    int r = vgetsingle(obj, arg_idx, fname, format, &va, FLAG_SIZE_T);
+
+    va_end(va);
+    return r;
+}
+
+extern PyTypeObject* attrwrapper_cls;
 
 /* Convert a non-tuple argument.  Return NULL if conversion went OK,
    or a string with a message describing the failure.  The message is
@@ -1258,7 +1281,7 @@ convertsimple(PyObject *arg, const char **p_format, va_list *p_va, int flags,
             type = va_arg(*p_va, PyTypeObject*);
             p = va_arg(*p_va, PyObject **);
             format++;
-            if (PyType_IsSubtype(arg->ob_type, type))
+            if (PyType_IsSubtype(arg->ob_type, type) || /* Pyston hack */ (arg->ob_type == attrwrapper_cls && type == &PyDict_Type))
                 *p = arg;
             else
                 return converterr(type->tp_name, arg, msgbuf, bufsize);
@@ -1467,7 +1490,20 @@ PyArg_ParseTupleAndKeywords(PyObject *args,
     }
 
     va_start(va, kwlist);
-    retval = vgetargskeywords(args, keywords, format, kwlist, &va, 0);
+
+    // Pyston change: special case "O|" and "OO|" because they are common
+    // retval = vgetargskeywords(args, keywords, format, kwlist, &va, 0);
+    if (format[0] == 'O' && format[1] == '|' && PyTuple_GET_SIZE(args) == 1 && !keywords) {
+        *va_arg(va, PyObject **) = PyTuple_GET_ITEM(args, 0);
+        retval = 1;
+    } else if (format[0] == 'O' && format[1] == 'O' && format[2] == '|' && PyTuple_GET_SIZE(args) == 2 && !keywords) {
+        *va_arg(va, PyObject **) = PyTuple_GET_ITEM(args, 0);
+        *va_arg(va, PyObject **) = PyTuple_GET_ITEM(args, 1);
+        retval = 1;
+    } else {
+        retval = vgetargskeywords(args, keywords, format, kwlist, &va, 0);
+    }
+
     va_end(va);
     return retval;
 }

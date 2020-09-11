@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@
 
 namespace pyston {
 
-class AST;
+class BST_stmt;
 class Box;
 class BoxedClass;
 
@@ -33,11 +33,10 @@ class TypeRecorder;
 // The return value of this function is 'obj' for ease of use.
 extern "C" Box* recordType(TypeRecorder* recorder, Box* obj);
 class TypeRecorder {
-private:
+public:
     BoxedClass* last_seen;
     int64_t last_count;
 
-public:
     constexpr TypeRecorder() : last_seen(nullptr), last_count(0) {}
 
     BoxedClass* predict();
@@ -45,9 +44,7 @@ public:
     friend Box* recordType(TypeRecorder*, Box*);
 };
 
-TypeRecorder* getTypeRecorderForNode(AST* node);
-
-BoxedClass* predictClassFor(AST* node);
+BoxedClass* predictClassFor(BST_stmt* node);
 }
 
 #endif

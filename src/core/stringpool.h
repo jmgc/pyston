@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/StringRef.h"
+#include "Python.h"
 
 #include "core/common.h"
 
@@ -61,7 +62,7 @@ public:
     InternedString() : _str(NULL) {}
 #endif
 
-    BoxedString* getBox() const {
+    BORROWED(BoxedString*) getBox() const {
         assert(this->_str);
         return _str;
     }
@@ -69,18 +70,29 @@ public:
     const char* c_str() const;
 
     bool operator==(InternedString rhs) const {
-        assert(this->_str || this->pool == invalidPool());
-        assert(rhs._str || rhs.pool == invalidPool());
-        assert(this->pool == rhs.pool || this->pool == invalidPool() || rhs.pool == invalidPool());
+        // assert(this->_str || this->pool == invalidPool());
+        // assert(rhs._str || rhs.pool == invalidPool());
+        // assert(this->pool == rhs.pool || this->pool == invalidPool() || rhs.pool == invalidPool());
         return this->_str == rhs._str;
     }
+    bool operator!=(InternedString rhs) const { return !(*this == rhs); }
 
     // This function compares the actual string contents
     bool operator<(InternedString rhs) const { return this->s().compare(rhs.s()) == -1; }
 
     llvm::StringRef s() const;
     operator llvm::StringRef() const { return s(); }
-    operator BoxedString*() const { return getBox(); }
+    operator BORROWED(BoxedString*)() const { return getBox(); }
+
+    bool isCompilerCreatedName() const;
+
+    static InternedString unsafe(BoxedString* str) {
+#ifndef NDEBUG
+        return InternedString(str, NULL);
+#else
+        return InternedString(str);
+#endif
+    }
 
     friend class InternedStringPool;
     friend struct std::hash<InternedString>;
@@ -127,7 +139,7 @@ template <> struct DenseMapInfo<pyston::InternedString> {
         return pyston::InternedString((pyston::BoxedString*)-1);
 #endif
     }
-    static unsigned getHashValue(const pyston::InternedString& val) { return std::hash<pyston::InternedString>()(val); }
+    static size_t getHashValue(const pyston::InternedString& val) { return std::hash<pyston::InternedString>()(val); }
     static bool isEqual(const pyston::InternedString& lhs, const pyston::InternedString& rhs) { return lhs == rhs; }
 };
 }

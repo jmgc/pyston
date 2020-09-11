@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 
 #include "core/common.h"
 #include "core/stringpool.h"
+#include "core/types.h"
 
 namespace pyston {
 
@@ -27,14 +28,13 @@ class AST_Module;
 class AST_Expression;
 class AST_Suite;
 
-// Each closure has an array (fixed-size for that particular scope) of variables
-// and a parent pointer to a parent closure. To look up a variable from the passed-in
-// closure (i.e., DEREF), you just need to know (i) how many parents up to go and
-// (ii) what offset into the array to find the variable. This struct stores that
-// information. You can query the ScopeInfo with a name to get this info.
-struct DerefInfo {
-    size_t num_parents_from_passed_closure;
-    size_t offset;
+enum class NameLookupUsage {
+    // Normal scope
+    NONE,
+    // Loads to unstored names are NAME:
+    SOME,
+    // All stores and loads are NAME lookups:
+    ALL,
 };
 
 class ScopeInfo {
@@ -74,7 +74,7 @@ public:
     //  import dis
     //  print dis.dis(g)
 
-    enum class VarScopeType {
+    enum class VarScopeType : unsigned char {
         FAST,
         GLOBAL,
         CLOSURE,
@@ -87,11 +87,7 @@ public:
     };
     virtual VarScopeType getScopeTypeOfName(InternedString name) = 0;
 
-    // Returns true if the scope may contain NAME variables.
-    // In particular, it returns true for ClassDef scope, for any scope
-    // with an `exec` statement or `import *` statement in it, or for any
-    // `exec` or `eval` scope.
-    virtual bool usesNameLookup() = 0;
+    virtual NameLookupUsage getNameLookupUsage() = 0;
 
     virtual bool areLocalsFromModule() = 0;
 
@@ -151,27 +147,16 @@ public:
     typedef llvm::DenseMap<AST*, ScopeNameUsage*> NameUsageMap;
 
 private:
-    llvm::DenseMap<AST*, ScopeInfo*> scopes;
+    llvm::DenseMap<AST*, std::unique_ptr<ScopeInfo>> scopes;
     AST_Module* parent_module;
     InternedStringPool* interned_strings;
 
-    llvm::DenseMap<AST*, AST*> scope_replacements;
-
-    ScopeInfo* analyzeSubtree(AST* node);
+    void analyzeSubtree(AST* node);
     void processNameUsages(NameUsageMap* usages);
 
     bool globals_from_module;
 
 public:
-    // The scope-analysis is done before any CFG-ization is done,
-    // but many of the queries will be done post-CFG-ization.
-    // The CFG process can replace scope AST nodes with others (ex:
-    // generator expressions with generator functions), so we need to
-    // have a way of mapping the original analysis with the new queries.
-    // This is a hook for the CFG process to register when it has replaced
-    // a scope-node with a different node.
-    void registerScopeReplacement(AST* original_node, AST* new_node);
-
     ScopingAnalysis(AST* ast, bool globals_from_module);
     ScopeInfo* getScopeInfoForNode(AST* node);
 
@@ -179,7 +164,9 @@ public:
     bool areGlobalsFromModule() { return globals_from_module; }
 };
 
+class AST_stmt;
 bool containsYield(AST* ast);
+bool containsYield(llvm::ArrayRef<AST_stmt*> ast);
 
 class BoxedString;
 BoxedString* mangleNameBoxedString(BoxedString* id, BoxedString* private_name);

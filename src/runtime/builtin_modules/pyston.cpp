@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "codegen/parser.h"
 #include "core/types.h"
 #include "runtime/objmodel.h"
 #include "runtime/types.h"
@@ -47,12 +48,12 @@ static Box* setOption(Box* option, Box* value) {
     else CHECK(ENABLE_ICGETATTRS);
     else raiseExcHelper(ValueError, "unknown option name '%s", option_string->data());
 
-    return None;
+    Py_RETURN_NONE;
 }
 
 static Box* clearStats() {
     Stats::clear();
-    return None;
+    Py_RETURN_NONE;
 }
 
 static Box* dumpStats(Box* includeZeros) {
@@ -60,19 +61,34 @@ static Box* dumpStats(Box* includeZeros) {
         raiseExcHelper(TypeError, "includeZeros must be a 'bool' object but received a '%s'",
                        getTypeName(includeZeros));
     Stats::dump(((BoxedBool*)includeZeros)->n != 0);
-    return None;
+    Py_RETURN_NONE;
+}
+
+static Box* pyCompile(Box* fname, Box* force) {
+    if (fname->cls != str_cls)
+        raiseExcHelper(TypeError, "py_compile takes a string for the filename");
+
+    if (force->cls != bool_cls)
+        raiseExcHelper(TypeError, "py_compile takes a bool for 'force' argument");
+
+    caching_parse_file(static_cast<BoxedString*>(fname)->c_str(), /* future flags */ 0, force == Py_True);
+
+    Py_RETURN_NONE;
 }
 
 void setupPyston() {
-    pyston_module = createModule("__pyston__");
+    pyston_module = createModule(autoDecref(boxString("__pyston__")));
 
-    pyston_module->giveAttr("setOption",
-                            new BoxedBuiltinFunctionOrMethod(boxRTFunction((void*)setOption, UNKNOWN, 2), "setOption"));
+    pyston_module->giveAttr(
+        "setOption", new BoxedBuiltinFunctionOrMethod(BoxedCode::create((void*)setOption, UNKNOWN, 2, "setOption")));
 
-    pyston_module->giveAttr("clearStats",
-                            new BoxedBuiltinFunctionOrMethod(boxRTFunction((void*)clearStats, NONE, 0), "clearStats"));
+    pyston_module->giveAttr(
+        "clearStats", new BoxedBuiltinFunctionOrMethod(BoxedCode::create((void*)clearStats, NONE, 0, "clearStats")));
     pyston_module->giveAttr("dumpStats",
-                            new BoxedBuiltinFunctionOrMethod(boxRTFunction((void*)dumpStats, NONE, 1, 1, false, false),
-                                                             "dumpStats", { False }));
+                            new BoxedBuiltinFunctionOrMethod(
+                                BoxedCode::create((void*)dumpStats, NONE, 1, false, false, "dumpStats"), { Py_False }));
+
+    pyston_module->giveAttr(
+        "py_compile", new BoxedBuiltinFunctionOrMethod(BoxedCode::create((void*)pyCompile, UNKNOWN, 2, "pyCompile")));
 }
 }

@@ -1,4 +1,4 @@
-# skip-if: '-n' not in EXTRA_JIT_ARGS and '-O' not in EXTRA_JIT_ARGS
+# skip-if: '-n' not in EXTRA_JIT_ARGS and '-L' not in EXTRA_JIT_ARGS
 # statcheck: noninit_count('slowpath_setattr') < 50
 
 class MyDescr(object):
@@ -30,3 +30,11 @@ test(Test())
 del Test.__setattr__
 for i in xrange(100):
     test(Test())
+
+class Old():
+    pass
+old = Old()
+for i in xrange(1000):
+    old.a = i
+    assert old.a == i
+

@@ -1,4 +1,4 @@
-d = {2:2}
+d = {2:"should get overwritten", 2L:2}
 d[1] = 1
 print d
 print d[1], d[1L], d[1.0], d[True]
@@ -230,3 +230,26 @@ while True:
     except StopIteration:
         break
 print sorted(l)
+
+#recursive printing test
+d = dict()
+d['two'] = d
+print d
+
+
+# Remove an item using a different key:
+d = {1:1}
+d.pop(1L)
+
+
+# dict() will try to access the "keys" attribute, but it should swallow all exceptions
+class MyObj(object):
+    def __iter__(self):
+        print "iter!"
+        return [(1, 2)].__iter__()
+
+    def __getattr__(self, attr):
+        print "getattr", attr
+        1/0
+
+print dict(MyObj())

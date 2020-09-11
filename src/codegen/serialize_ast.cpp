@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -100,6 +100,22 @@ private:
         }
     }
 
+    void writeSlice(AST_slice* e) {
+        if (!e) {
+            writeByte(0x00);
+        } else {
+            writeByte(e->type);
+            writeByte(0xae); // check byte
+            e->accept(this);
+        }
+    }
+    void writeSliceVector(const std::vector<AST_slice*>& vec) {
+        writeShort(vec.size());
+        for (auto* e : vec) {
+            writeSlice(e);
+        }
+    }
+
     void writeExprVector(const std::vector<AST_expr*>& vec) {
         writeShort(vec.size());
         for (auto* e : vec) {
@@ -160,8 +176,8 @@ private:
     virtual bool visit_arguments(AST_arguments* node) {
         writeExprVector(node->args);
         writeExprVector(node->defaults);
-        writeString(node->kwarg);
-        writeString(node->vararg);
+        writeExpr(node->kwarg);
+        writeExpr(node->vararg);
         return true;
     }
     virtual bool visit_assert(AST_Assert* node) {
@@ -277,6 +293,7 @@ private:
         writeExpr(node->value);
         return true;
     }
+    virtual bool visit_ellipsis(AST_Ellipsis* node) { return true; }
     virtual bool visit_excepthandler(AST_ExceptHandler* node) {
         writeStmtVector(node->body);
         writeColOffset(node->col_offset);
@@ -300,7 +317,7 @@ private:
         return true;
     }
     virtual bool visit_extslice(AST_ExtSlice* node) {
-        writeExprVector(node->dims);
+        writeSliceVector(node->dims);
         return true;
     }
     virtual bool visit_for(AST_For* node) {
@@ -493,7 +510,7 @@ private:
         writeColOffset(node->col_offset);
         writeByte(node->ctx_type);
         writeLineno(node->lineno);
-        writeExpr(node->slice);
+        writeSlice(node->slice);
         writeExpr(node->value);
         return true;
     }

@@ -534,7 +534,7 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx*/
     /* new buffer API */
 
      // Pyston change: made this a function
-    bool _PyObject_CheckBuffer(PyObject* obj) PYSTON_NOEXCEPT;
+    int _PyObject_CheckBuffer(PyObject* obj) PYSTON_NOEXCEPT;
 #define PyObject_CheckBuffer(obj) _PyObject_CheckBuffer((PyObject*)(obj))
 
     /* Return 1 if the getbuffer function is available, otherwise
@@ -846,15 +846,10 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx*/
 
        */
 
-     // Pyston change: made this a function:
-    PyAPI_FUNC(bool) _PyIndex_Check(PyObject* o) PYSTON_NOEXCEPT;
-#define PyIndex_Check(obj) _PyIndex_Check((PyObject*)(obj))
-#if 0
 #define PyIndex_Check(obj) \
-   ((obj)->ob_type->tp_as_number != NULL && \
-    PyType_HasFeature((obj)->ob_type, Py_TPFLAGS_HAVE_INDEX) && \
-    (obj)->ob_type->tp_as_number->nb_index != NULL)
-#endif
+   (Py_TYPE((obj))->tp_as_number != NULL && \
+    PyType_HasFeature(Py_TYPE((obj)), Py_TPFLAGS_HAVE_INDEX) && \
+    Py_TYPE((obj))->tp_as_number->nb_index != NULL)
 
      PyAPI_FUNC(PyObject *) PyNumber_Index(PyObject *o) PYSTON_NOEXCEPT;
 
@@ -875,7 +870,7 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx*/
        */
 
      PyAPI_FUNC(PyObject *) _PyNumber_ConvertIntegralToInt(
-         PyObject *integral,
+         STOLEN(PyObject *) integral,
          const char* error_format) PYSTON_NOEXCEPT;
 
        /*
@@ -1359,7 +1354,7 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx*/
        */
 #define PyMapping_Items(O) PyObject_CallMethod(O,"items",NULL)
 
-     PyAPI_FUNC(PyObject *) PyMapping_GetItemString(PyObject *o, char *key) PYSTON_NOEXCEPT;
+     PyAPI_FUNC(PyObject *) PyMapping_GetItemString(PyObject *o, const char *key) PYSTON_NOEXCEPT;
 
        /*
      Return element of o corresponding to the object, key, or NULL
@@ -1367,7 +1362,7 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx*/
      o[key].
        */
 
-     PyAPI_FUNC(int) PyMapping_SetItemString(PyObject *o, char *key,
+     PyAPI_FUNC(int) PyMapping_SetItemString(PyObject *o, const char *key,
                                             PyObject *value) PYSTON_NOEXCEPT;
 
        /*

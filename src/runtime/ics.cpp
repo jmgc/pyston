@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,9 +14,7 @@
 
 #include "runtime/ics.h"
 
-#ifndef NVALGRIND
 #include <sys/mman.h>
-#endif
 
 #include "asm_writing/icinfo.h"
 #include "asm_writing/rewriter.h"
@@ -24,7 +22,6 @@
 #include "codegen/memmgr.h"
 #include "codegen/patchpoints.h"
 #include "codegen/stackmaps.h"
-#include "codegen/unwinding.h" // registerDynamicEhFrame
 #include "core/common.h"
 #include "core/options.h"
 #include "core/stats.h"
@@ -154,55 +151,14 @@ static const char _eh_frame_template_fp[] =
 static constexpr int _eh_frame_template_ofp_size = sizeof(_eh_frame_template_ofp) - 1;
 static constexpr int _eh_frame_template_fp_size = sizeof(_eh_frame_template_fp) - 1;
 
-#define EH_FRAME_SIZE (sizeof(_eh_frame_template) - 1) // omit string-terminating null byte
+#if RUNTIMEICS_OMIT_FRAME_PTR
+#define EH_FRAME_SIZE _eh_frame_template_ofp_size
+#else
+#define EH_FRAME_SIZE _eh_frame_template_fp_size;
+#endif
+
 
 static_assert(sizeof("") == 1, "strings are null-terminated");
-
-static void writeTrivialEhFrame(void* eh_frame_addr, void* func_addr, uint64_t func_size, bool omit_frame_pointer) {
-    if (omit_frame_pointer)
-        memcpy(eh_frame_addr, _eh_frame_template_ofp, _eh_frame_template_ofp_size);
-    else
-        memcpy(eh_frame_addr, _eh_frame_template_fp, _eh_frame_template_fp_size);
-
-    int32_t* offset_ptr = (int32_t*)((uint8_t*)eh_frame_addr + 0x20);
-    int32_t* size_ptr = (int32_t*)((uint8_t*)eh_frame_addr + 0x24);
-
-    int64_t offset = (int8_t*)func_addr - (int8_t*)offset_ptr;
-    assert(offset >= INT_MIN && offset <= INT_MAX);
-    *offset_ptr = offset;
-
-    assert(func_size <= UINT_MAX);
-    *size_ptr = func_size;
-}
-
-void EHFrameManager::writeAndRegister(void* func_addr, uint64_t func_size) {
-    assert(eh_frame_addr == NULL);
-    const int size = omit_frame_pointer ? _eh_frame_template_ofp_size : _eh_frame_template_fp_size;
-#ifdef NVALGRIND
-    eh_frame_addr = malloc(size);
-#else
-    eh_frame_addr = mmap(NULL, (size + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1), PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    RELEASE_ASSERT(eh_frame_addr != MAP_FAILED, "");
-#endif
-    writeTrivialEhFrame(eh_frame_addr, func_addr, func_size, omit_frame_pointer);
-    // (EH_FRAME_SIZE - 4) to omit the 4-byte null terminator, otherwise we trip an assert in parseEhFrame.
-    // TODO: can we omit the terminator in general?
-    registerDynamicEhFrame((uint64_t)func_addr, func_size, (uint64_t)eh_frame_addr, size - 4);
-    registerEHFrames((uint8_t*)eh_frame_addr, (uint64_t)eh_frame_addr, size);
-}
-
-EHFrameManager::~EHFrameManager() {
-    if (eh_frame_addr) {
-        const int size = omit_frame_pointer ? _eh_frame_template_ofp_size : _eh_frame_template_fp_size;
-        deregisterEHFrames((uint8_t*)eh_frame_addr, (uint64_t)eh_frame_addr, size);
-#ifdef NVALGRIND
-        free(eh_frame_addr);
-#else
-        munmap(eh_frame_addr, (size + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1));
-#endif
-    }
-}
 
 #if RUNTIMEICS_OMIT_FRAME_PTR
 // If you change this, you *must* update the value in _eh_frame_template
@@ -212,8 +168,36 @@ EHFrameManager::~EHFrameManager() {
 #define SCRATCH_BYTES 0x30
 #endif
 
-RuntimeIC::RuntimeIC(void* func_addr, int num_slots, int slot_size) : eh_frame(RUNTIMEICS_OMIT_FRAME_PTR) {
-    static StatCounter sc("runtime_ics_num");
+template <int chunk_size> class RuntimeICMemoryManager {
+private:
+    static constexpr int region_size = 4096;
+    static_assert(chunk_size < region_size, "");
+    static_assert(region_size % chunk_size == 0, "");
+
+    std::vector<void*> memory_regions;
+    llvm::SmallVector<void*, region_size / chunk_size> free_chunks;
+
+public:
+    void* alloc() {
+        if (free_chunks.empty()) {
+            int protection = PROT_READ | PROT_WRITE | PROT_EXEC;
+            int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT;
+            char* addr = (char*)mmap(NULL, region_size, protection, flags, -1, 0);
+            for (int i = 0; i < region_size / chunk_size; ++i) {
+                free_chunks.push_back(&addr[i * chunk_size]);
+            }
+        }
+        return free_chunks.pop_back_val();
+    }
+    void dealloc(void* ptr) {
+        free_chunks.push_back(ptr); // TODO: we should probably delete some regions if this list gets to large
+    }
+};
+
+static RuntimeICMemoryManager<512> memory_manager_512b;
+
+RuntimeIC::RuntimeIC(void* func_addr, int total_size) {
+    static StatCounter sc("num_runtime_ics");
     sc.log();
 
     if (ENABLE_RUNTIME_ICS) {
@@ -252,30 +236,27 @@ RuntimeIC::RuntimeIC(void* func_addr, int num_slots, int slot_size) : eh_frame(R
 #endif
         static const int CALL_SIZE = 13;
 
-        int patchable_size = num_slots * slot_size;
+        int total_code_size = total_size - EH_FRAME_SIZE;
+        int patchable_size = total_code_size - (PROLOGUE_SIZE + CALL_SIZE + EPILOGUE_SIZE);
 
-#ifdef NVALGRIND
-        int total_size = PROLOGUE_SIZE + patchable_size + CALL_SIZE + EPILOGUE_SIZE;
-        addr = malloc(total_size);
-#else
-        total_size = PROLOGUE_SIZE + patchable_size + CALL_SIZE + EPILOGUE_SIZE;
-        addr = mmap(NULL, (total_size + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1), PROT_READ | PROT_WRITE | PROT_EXEC,
-                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        RELEASE_ASSERT(addr != MAP_FAILED, "");
-#endif
+        int total_size = total_code_size + EH_FRAME_SIZE;
+        assert(total_size == 512 && "we currently only have a 512 byte block memory manager");
+        addr = memory_manager_512b.alloc();
+
+        // the memory block contains the EH frame directly followed by the generated machine code.
+        void* eh_frame_addr = addr;
+        addr = (char*)addr + EH_FRAME_SIZE;
 
         // printf("Allocated runtime IC at %p\n", addr);
 
-        std::unique_ptr<ICSetupInfo> setup_info(
-            ICSetupInfo::initialize(true, num_slots, slot_size, ICSetupInfo::Generic, NULL));
+        std::unique_ptr<ICSetupInfo> setup_info(ICSetupInfo::initialize(true, patchable_size, ICSetupInfo::Generic));
         uint8_t* pp_start = (uint8_t*)addr + PROLOGUE_SIZE;
         uint8_t* pp_end = pp_start + patchable_size + CALL_SIZE;
 
 
         SpillMap _spill_map;
-        PatchpointInitializationInfo initialization_info
-            = initializePatchpoint3(func_addr, pp_start, pp_end, 0 /* scratch_offset */, 0 /* scratch_size */,
-                                    std::unordered_set<int>(), _spill_map);
+        PatchpointInitializationInfo initialization_info = initializePatchpoint3(
+            func_addr, pp_start, pp_end, 0 /* scratch_offset */, 0 /* scratch_size */, LiveOutSet(), _spill_map);
         assert(_spill_map.size() == 0);
         assert(initialization_info.slowpath_start == pp_start + patchable_size);
         assert(initialization_info.slowpath_rtn_addr == pp_end);
@@ -283,7 +264,7 @@ RuntimeIC::RuntimeIC(void* func_addr, int num_slots, int slot_size) : eh_frame(R
 
         StackInfo stack_info(SCRATCH_BYTES, 0);
         icinfo = registerCompiledPatchpoint(pp_start, pp_start + patchable_size, pp_end, pp_end, setup_info.get(),
-                                            stack_info, std::unordered_set<int>());
+                                            stack_info, LiveOutSet());
 
         assembler::Assembler prologue_assem((uint8_t*)addr, PROLOGUE_SIZE);
 #if RUNTIMEICS_OMIT_FRAME_PTR
@@ -309,9 +290,13 @@ RuntimeIC::RuntimeIC(void* func_addr, int num_slots, int slot_size) : eh_frame(R
         assert(!epilogue_assem.hasFailed());
         assert(epilogue_assem.isExactlyFull());
 
-        // TODO: ideally would be more intelligent about allocation strategies.
-        // The code sections should be together and the eh sections together
-        eh_frame.writeAndRegister(addr, total_size);
+
+        if (RUNTIMEICS_OMIT_FRAME_PTR)
+            memcpy(eh_frame_addr, _eh_frame_template_ofp, _eh_frame_template_ofp_size);
+        else
+            memcpy(eh_frame_addr, _eh_frame_template_fp, _eh_frame_template_fp_size);
+        register_eh_frame.updateAndRegisterFrameFromTemplate((uint64_t)addr, total_code_size, (uint64_t)eh_frame_addr,
+                                                             EH_FRAME_SIZE);
     } else {
         addr = func_addr;
     }
@@ -319,12 +304,9 @@ RuntimeIC::RuntimeIC(void* func_addr, int num_slots, int slot_size) : eh_frame(R
 
 RuntimeIC::~RuntimeIC() {
     if (ENABLE_RUNTIME_ICS) {
-        deregisterCompiledPatchpoint(icinfo.get());
-#ifdef NVALGRIND
-        free(addr);
-#else
-        munmap(addr, total_size);
-#endif
+        register_eh_frame.deregisterFrame();
+        uint8_t* eh_frame_addr = (uint8_t*)addr - EH_FRAME_SIZE;
+        memory_manager_512b.dealloc(eh_frame_addr);
     } else {
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,10 +23,10 @@
 
 namespace pyston {
 
-class ScopeInfo;
 class CFGBlock;
+class CodeConstants;
 class BoxedClass;
-class AST_expr;
+class BST_stmt_with_dest;
 class OSREntryDescriptor;
 
 class TypeAnalysis {
@@ -38,16 +38,16 @@ public:
 
     virtual ~TypeAnalysis() {}
 
-    virtual ConcreteCompilerType* getTypeAtBlockStart(InternedString name, CFGBlock* block) = 0;
-    virtual ConcreteCompilerType* getTypeAtBlockEnd(InternedString name, CFGBlock* block) = 0;
-    virtual BoxedClass* speculatedExprClass(AST_expr*) = 0;
+    virtual ConcreteCompilerType* getTypeAtBlockStart(int vreg, CFGBlock* block) = 0;
+    virtual ConcreteCompilerType* getTypeAtBlockEnd(int vreg, CFGBlock* block) = 0;
+    virtual BoxedClass* speculatedExprClass(BST_stmt_with_dest*) = 0;
 };
 
 TypeAnalysis* doTypeAnalysis(CFG* cfg, const ParamNames& param_names,
                              const std::vector<ConcreteCompilerType*>& arg_types, EffortLevel effort,
-                             TypeAnalysis::SpeculationLevel speculation, ScopeInfo* scope_info);
+                             TypeAnalysis::SpeculationLevel speculation, const CodeConstants& code_constants);
 TypeAnalysis* doTypeAnalysis(const OSREntryDescriptor* entry_descriptor, EffortLevel effort,
-                             TypeAnalysis::SpeculationLevel speculation, ScopeInfo* scope_info);
+                             TypeAnalysis::SpeculationLevel speculation, const CodeConstants& code_constants);
 }
 
 #endif

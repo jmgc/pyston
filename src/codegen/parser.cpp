@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
 
 #include "codegen/parser.h"
 
+#include "cpython_ast.h"
+
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -25,13 +27,13 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 
-#include "codegen/pypa-parser.h"
 #include "codegen/serialize_ast.h"
 #include "core/ast.h"
 #include "core/options.h"
 #include "core/stats.h"
 #include "core/types.h"
 #include "core/util.h"
+#include "runtime/types.h"
 
 //#undef VERBOSITY
 //#define VERBOSITY(x) 2
@@ -39,6 +41,10 @@
 namespace pyston {
 
 bool DEBUG_PARSING = false;
+const char* MAGIC = "a\nCR";
+#define MAGIC_STRING_LENGTH 4
+#define LENGTH_LENGTH sizeof(int)
+#define CHECKSUM_LENGTH 1
 
 class BufferedReader {
 private:
@@ -59,6 +65,8 @@ private:
     }
 
 public:
+    std::unique_ptr<ASTAllocator> ast_allocator;
+
     void fill() {
         if (unlikely(fp)) {
             memmove(buf, buf + start, end - start);
@@ -70,9 +78,15 @@ public:
         }
     }
 
-    BufferedReader(FILE* fp) : start(0), end(0), fp(fp), data(), intern_pool(NULL) {}
+    BufferedReader(FILE* fp)
+        : start(0), end(0), fp(fp), data(), intern_pool(NULL), ast_allocator(llvm::make_unique<ASTAllocator>()) {}
     BufferedReader(std::vector<char> data, int start_offset = 0)
-        : start(start_offset), end(data.size()), fp(NULL), data(std::move(data)), intern_pool(NULL) {}
+        : start(start_offset),
+          end(data.size()),
+          fp(NULL),
+          data(std::move(data)),
+          intern_pool(NULL),
+          ast_allocator(llvm::make_unique<ASTAllocator>()) {}
 
     int bytesBuffered() { return (end - start); }
 
@@ -98,6 +112,8 @@ public:
         return d;
     }
 
+    ASTAllocator& getAlloc() { return *ast_allocator; }
+
     std::unique_ptr<InternedStringPool> createInternedPool();
     InternedString readAndInternString();
     void readAndInternStringVector(std::vector<InternedString>& v);
@@ -112,6 +128,7 @@ std::unique_ptr<InternedStringPool> BufferedReader::createInternedPool() {
 AST* readASTMisc(BufferedReader* reader);
 AST_expr* readASTExpr(BufferedReader* reader);
 AST_stmt* readASTStmt(BufferedReader* reader);
+AST_slice* readASTSlice(BufferedReader* reader);
 
 static std::string readString(BufferedReader* reader) {
     int strlen = reader->readUInt();
@@ -167,6 +184,15 @@ static void readExprVector(std::vector<AST_expr*>& vec, BufferedReader* reader) 
     }
 }
 
+static void readSliceVector(std::vector<AST_slice*>& vec, BufferedReader* reader) {
+    int num_elts = reader->readShort();
+    if (VERBOSITY("parsing") >= 3)
+        printf("%d elts to read\n", num_elts);
+    for (int i = 0; i < num_elts; i++) {
+        vec.push_back(readASTSlice(reader));
+    }
+}
+
 template <class T> static void readMiscVector(std::vector<T*>& vec, BufferedReader* reader) {
     int num_elts = reader->readShort();
     if (VERBOSITY("parsing") >= 3)
@@ -189,7 +215,7 @@ AST_alias* read_alias(BufferedReader* reader) {
     InternedString asname = reader->readAndInternString();
     InternedString name = reader->readAndInternString();
 
-    AST_alias* rtn = new AST_alias(name, asname);
+    AST_alias* rtn = new (reader->getAlloc()) AST_alias(name, asname);
     rtn->col_offset = -1;
     rtn->lineno = -1;
 
@@ -200,19 +226,19 @@ AST_arguments* read_arguments(BufferedReader* reader) {
     if (VERBOSITY("parsing") >= 3)
         printf("reading arguments\n");
 
-    AST_arguments* rtn = new AST_arguments();
+    AST_arguments* rtn = new (reader->getAlloc()) AST_arguments();
 
     readExprVector(rtn->args, reader);
     rtn->col_offset = -1;
     readExprVector(rtn->defaults, reader);
-    rtn->kwarg = reader->readAndInternString();
+    rtn->kwarg = ast_cast<AST_Name>(readASTExpr(reader));
     rtn->lineno = -1;
-    rtn->vararg = reader->readAndInternString();
+    rtn->vararg = ast_cast<AST_Name>(readASTExpr(reader));
     return rtn;
 }
 
 AST_Assert* read_assert(BufferedReader* reader) {
-    AST_Assert* rtn = new AST_Assert();
+    AST_Assert* rtn = new (reader->getAlloc()) AST_Assert();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -222,7 +248,7 @@ AST_Assert* read_assert(BufferedReader* reader) {
 }
 
 AST_Assign* read_assign(BufferedReader* reader) {
-    AST_Assign* rtn = new AST_Assign();
+    AST_Assign* rtn = new (reader->getAlloc()) AST_Assign();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -232,7 +258,7 @@ AST_Assign* read_assign(BufferedReader* reader) {
 }
 
 AST_AugAssign* read_augassign(BufferedReader* reader) {
-    AST_AugAssign* rtn = new AST_AugAssign();
+    AST_AugAssign* rtn = new (reader->getAlloc()) AST_AugAssign();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -243,7 +269,7 @@ AST_AugAssign* read_augassign(BufferedReader* reader) {
 }
 
 AST_Attribute* read_attribute(BufferedReader* reader) {
-    AST_Attribute* rtn = new AST_Attribute();
+    AST_Attribute* rtn = new (reader->getAlloc()) AST_Attribute();
 
     rtn->attr = reader->readAndInternString();
     rtn->col_offset = readColOffset(reader);
@@ -254,7 +280,7 @@ AST_Attribute* read_attribute(BufferedReader* reader) {
 }
 
 AST_expr* read_binop(BufferedReader* reader) {
-    AST_BinOp* rtn = new AST_BinOp();
+    AST_BinOp* rtn = new (reader->getAlloc()) AST_BinOp();
 
     rtn->col_offset = readColOffset(reader);
     rtn->left = readASTExpr(reader);
@@ -266,7 +292,7 @@ AST_expr* read_binop(BufferedReader* reader) {
 }
 
 AST_expr* read_boolop(BufferedReader* reader) {
-    AST_BoolOp* rtn = new AST_BoolOp();
+    AST_BoolOp* rtn = new (reader->getAlloc()) AST_BoolOp();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -277,7 +303,7 @@ AST_expr* read_boolop(BufferedReader* reader) {
 }
 
 AST_Break* read_break(BufferedReader* reader) {
-    AST_Break* rtn = new AST_Break();
+    AST_Break* rtn = new (reader->getAlloc()) AST_Break();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -286,7 +312,7 @@ AST_Break* read_break(BufferedReader* reader) {
 }
 
 AST_Call* read_call(BufferedReader* reader) {
-    AST_Call* rtn = new AST_Call();
+    AST_Call* rtn = new (reader->getAlloc()) AST_Call();
 
     readExprVector(rtn->args, reader);
     rtn->col_offset = readColOffset(reader);
@@ -301,7 +327,7 @@ AST_Call* read_call(BufferedReader* reader) {
 }
 
 AST_expr* read_compare(BufferedReader* reader) {
-    AST_Compare* rtn = new AST_Compare();
+    AST_Compare* rtn = new (reader->getAlloc()) AST_Compare();
 
     rtn->col_offset = readColOffset(reader);
     readExprVector(rtn->comparators, reader);
@@ -318,7 +344,7 @@ AST_expr* read_compare(BufferedReader* reader) {
 }
 
 AST_comprehension* read_comprehension(BufferedReader* reader) {
-    AST_comprehension* rtn = new AST_comprehension();
+    AST_comprehension* rtn = new (reader->getAlloc()) AST_comprehension();
 
     readExprVector(rtn->ifs, reader);
     rtn->iter = readASTExpr(reader);
@@ -331,7 +357,7 @@ AST_comprehension* read_comprehension(BufferedReader* reader) {
 }
 
 AST_ClassDef* read_classdef(BufferedReader* reader) {
-    AST_ClassDef* rtn = new AST_ClassDef();
+    AST_ClassDef* rtn = new (reader->getAlloc()) AST_ClassDef();
 
     readExprVector(rtn->bases, reader);
     readStmtVector(rtn->body, reader);
@@ -344,7 +370,7 @@ AST_ClassDef* read_classdef(BufferedReader* reader) {
 }
 
 AST_Continue* read_continue(BufferedReader* reader) {
-    AST_Continue* rtn = new AST_Continue();
+    AST_Continue* rtn = new (reader->getAlloc()) AST_Continue();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -353,7 +379,7 @@ AST_Continue* read_continue(BufferedReader* reader) {
 }
 
 AST_Delete* read_delete(BufferedReader* reader) {
-    AST_Delete* rtn = new AST_Delete();
+    AST_Delete* rtn = new (reader->getAlloc()) AST_Delete();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -363,7 +389,7 @@ AST_Delete* read_delete(BufferedReader* reader) {
 }
 
 AST_Dict* read_dict(BufferedReader* reader) {
-    AST_Dict* rtn = new AST_Dict();
+    AST_Dict* rtn = new (reader->getAlloc()) AST_Dict();
 
     rtn->col_offset = readColOffset(reader);
     readExprVector(rtn->keys, reader);
@@ -375,7 +401,7 @@ AST_Dict* read_dict(BufferedReader* reader) {
 }
 
 AST_DictComp* read_dictcomp(BufferedReader* reader) {
-    AST_DictComp* rtn = new AST_DictComp();
+    AST_DictComp* rtn = new (reader->getAlloc()) AST_DictComp();
     rtn->col_offset = readColOffset(reader);
     readMiscVector(rtn->generators, reader);
     rtn->key = readASTExpr(reader);
@@ -384,9 +410,15 @@ AST_DictComp* read_dictcomp(BufferedReader* reader) {
     return rtn;
 }
 
+AST_Ellipsis* read_ellipsis(BufferedReader* reader) {
+    AST_Ellipsis* rtn = new (reader->getAlloc()) AST_Ellipsis();
+    rtn->col_offset = -1;
+    rtn->lineno = -1;
+    return rtn;
+}
 
 AST_ExceptHandler* read_excepthandler(BufferedReader* reader) {
-    AST_ExceptHandler* rtn = new AST_ExceptHandler();
+    AST_ExceptHandler* rtn = new (reader->getAlloc()) AST_ExceptHandler();
 
     readStmtVector(rtn->body, reader);
     rtn->col_offset = readColOffset(reader);
@@ -398,7 +430,7 @@ AST_ExceptHandler* read_excepthandler(BufferedReader* reader) {
 }
 
 AST_Exec* read_exec(BufferedReader* reader) {
-    AST_Exec* rtn = new AST_Exec();
+    AST_Exec* rtn = new (reader->getAlloc()) AST_Exec();
 
     rtn->body = readASTExpr(reader);
     rtn->col_offset = readColOffset(reader);
@@ -410,7 +442,7 @@ AST_Exec* read_exec(BufferedReader* reader) {
 }
 
 AST_Expr* read_expr(BufferedReader* reader) {
-    AST_Expr* rtn = new AST_Expr();
+    AST_Expr* rtn = new (reader->getAlloc()) AST_Expr();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -419,16 +451,16 @@ AST_Expr* read_expr(BufferedReader* reader) {
 }
 
 AST_ExtSlice* read_extslice(BufferedReader* reader) {
-    AST_ExtSlice* rtn = new AST_ExtSlice();
+    AST_ExtSlice* rtn = new (reader->getAlloc()) AST_ExtSlice();
 
     rtn->col_offset = -1;
     rtn->lineno = -1;
-    readExprVector(rtn->dims, reader);
+    readSliceVector(rtn->dims, reader);
     return rtn;
 }
 
 AST_For* read_for(BufferedReader* reader) {
-    AST_For* rtn = new AST_For();
+    AST_For* rtn = new (reader->getAlloc()) AST_For();
 
     readStmtVector(rtn->body, reader);
     rtn->col_offset = readColOffset(reader);
@@ -442,7 +474,7 @@ AST_For* read_for(BufferedReader* reader) {
 AST_FunctionDef* read_functiondef(BufferedReader* reader) {
     if (VERBOSITY("parsing") >= 3)
         printf("reading functiondef\n");
-    AST_FunctionDef* rtn = new AST_FunctionDef();
+    AST_FunctionDef* rtn = new (reader->getAlloc()) AST_FunctionDef();
 
     rtn->args = ast_cast<AST_arguments>(readASTMisc(reader));
     readStmtVector(rtn->body, reader);
@@ -454,7 +486,7 @@ AST_FunctionDef* read_functiondef(BufferedReader* reader) {
 }
 
 AST_GeneratorExp* read_generatorexp(BufferedReader* reader) {
-    AST_GeneratorExp* rtn = new AST_GeneratorExp();
+    AST_GeneratorExp* rtn = new (reader->getAlloc()) AST_GeneratorExp();
 
     rtn->col_offset = readColOffset(reader);
     rtn->elt = readASTExpr(reader);
@@ -464,7 +496,7 @@ AST_GeneratorExp* read_generatorexp(BufferedReader* reader) {
 }
 
 AST_Global* read_global(BufferedReader* reader) {
-    AST_Global* rtn = new AST_Global();
+    AST_Global* rtn = new (reader->getAlloc()) AST_Global();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -473,7 +505,7 @@ AST_Global* read_global(BufferedReader* reader) {
 }
 
 AST_If* read_if(BufferedReader* reader) {
-    AST_If* rtn = new AST_If();
+    AST_If* rtn = new (reader->getAlloc()) AST_If();
 
     readStmtVector(rtn->body, reader);
     rtn->col_offset = readColOffset(reader);
@@ -484,7 +516,7 @@ AST_If* read_if(BufferedReader* reader) {
 }
 
 AST_IfExp* read_ifexp(BufferedReader* reader) {
-    AST_IfExp* rtn = new AST_IfExp();
+    AST_IfExp* rtn = new (reader->getAlloc()) AST_IfExp();
 
     rtn->body = readASTExpr(reader);
     rtn->col_offset = readColOffset(reader);
@@ -495,7 +527,7 @@ AST_IfExp* read_ifexp(BufferedReader* reader) {
 }
 
 AST_Import* read_import(BufferedReader* reader) {
-    AST_Import* rtn = new AST_Import();
+    AST_Import* rtn = new (reader->getAlloc()) AST_Import();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -504,7 +536,7 @@ AST_Import* read_import(BufferedReader* reader) {
 }
 
 AST_ImportFrom* read_importfrom(BufferedReader* reader) {
-    AST_ImportFrom* rtn = new AST_ImportFrom();
+    AST_ImportFrom* rtn = new (reader->getAlloc()) AST_ImportFrom();
 
     rtn->col_offset = readColOffset(reader);
     rtn->level = reader->readULL();
@@ -515,7 +547,7 @@ AST_ImportFrom* read_importfrom(BufferedReader* reader) {
 }
 
 AST_Index* read_index(BufferedReader* reader) {
-    AST_Index* rtn = new AST_Index();
+    AST_Index* rtn = new (reader->getAlloc()) AST_Index();
 
     rtn->col_offset = -1;
     rtn->lineno = -1;
@@ -525,7 +557,7 @@ AST_Index* read_index(BufferedReader* reader) {
 }
 
 AST_keyword* read_keyword(BufferedReader* reader) {
-    AST_keyword* rtn = new AST_keyword();
+    AST_keyword* rtn = new (reader->getAlloc()) AST_keyword();
 
     rtn->arg = reader->readAndInternString();
     rtn->col_offset = -1;
@@ -535,7 +567,7 @@ AST_keyword* read_keyword(BufferedReader* reader) {
 }
 
 AST_Lambda* read_lambda(BufferedReader* reader) {
-    AST_Lambda* rtn = new AST_Lambda();
+    AST_Lambda* rtn = new (reader->getAlloc()) AST_Lambda();
 
     rtn->args = ast_cast<AST_arguments>(readASTMisc(reader));
     rtn->body = readASTExpr(reader);
@@ -545,7 +577,7 @@ AST_Lambda* read_lambda(BufferedReader* reader) {
 }
 
 AST_List* read_list(BufferedReader* reader) {
-    AST_List* rtn = new AST_List();
+    AST_List* rtn = new (reader->getAlloc()) AST_List();
 
     rtn->col_offset = readColOffset(reader);
     rtn->ctx_type = (AST_TYPE::AST_TYPE)reader->readByte();
@@ -555,7 +587,7 @@ AST_List* read_list(BufferedReader* reader) {
 }
 
 AST_ListComp* read_listcomp(BufferedReader* reader) {
-    AST_ListComp* rtn = new AST_ListComp();
+    AST_ListComp* rtn = new (reader->getAlloc()) AST_ListComp();
 
     rtn->col_offset = readColOffset(reader);
     rtn->elt = readASTExpr(reader);
@@ -568,11 +600,11 @@ AST_Module* read_module(BufferedReader* reader) {
     if (VERBOSITY("parsing") >= 3)
         printf("reading module\n");
 
-    AST_Module* rtn = new AST_Module(reader->createInternedPool());
+    AST_Module* rtn = new (reader->getAlloc()) AST_Module(reader->createInternedPool());
 
     readStmtVector(rtn->body, reader);
-    rtn->col_offset = -1;
-    rtn->lineno = -1;
+    rtn->col_offset = 0;
+    rtn->lineno = 0;
     return rtn;
 }
 
@@ -582,11 +614,11 @@ AST_Name* read_name(BufferedReader* reader) {
     auto id = reader->readAndInternString();
     auto lineno = reader->readULL();
 
-    return new AST_Name(std::move(id), ctx_type, lineno, col_offset);
+    return new (reader->getAlloc()) AST_Name(std::move(id), ctx_type, lineno, col_offset);
 }
 
 AST_Num* read_num(BufferedReader* reader) {
-    AST_Num* rtn = new AST_Num();
+    AST_Num* rtn = new (reader->getAlloc()) AST_Num();
 
     rtn->num_type = (AST_Num::NumType)reader->readByte();
 
@@ -608,7 +640,7 @@ AST_Num* read_num(BufferedReader* reader) {
 }
 
 AST_Repr* read_repr(BufferedReader* reader) {
-    AST_Repr* rtn = new AST_Repr();
+    AST_Repr* rtn = new (reader->getAlloc()) AST_Repr();
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
     rtn->value = readASTExpr(reader);
@@ -617,7 +649,7 @@ AST_Repr* read_repr(BufferedReader* reader) {
 }
 
 AST_Pass* read_pass(BufferedReader* reader) {
-    AST_Pass* rtn = new AST_Pass();
+    AST_Pass* rtn = new (reader->getAlloc()) AST_Pass();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -625,7 +657,7 @@ AST_Pass* read_pass(BufferedReader* reader) {
 }
 
 AST_Print* read_print(BufferedReader* reader) {
-    AST_Print* rtn = new AST_Print();
+    AST_Print* rtn = new (reader->getAlloc()) AST_Print();
 
     rtn->col_offset = readColOffset(reader);
     rtn->dest = readASTExpr(reader);
@@ -636,7 +668,7 @@ AST_Print* read_print(BufferedReader* reader) {
 }
 
 AST_Raise* read_raise(BufferedReader* reader) {
-    AST_Raise* rtn = new AST_Raise();
+    AST_Raise* rtn = new (reader->getAlloc()) AST_Raise();
 
     // "arg0" "arg1" "arg2" are called "type", "inst", and "tback" in the python ast,
     // so that's the order we have to read them:
@@ -649,7 +681,7 @@ AST_Raise* read_raise(BufferedReader* reader) {
 }
 
 AST_Return* read_return(BufferedReader* reader) {
-    AST_Return* rtn = new AST_Return();
+    AST_Return* rtn = new (reader->getAlloc()) AST_Return();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -658,7 +690,7 @@ AST_Return* read_return(BufferedReader* reader) {
 }
 
 AST_Set* read_set(BufferedReader* reader) {
-    AST_Set* rtn = new AST_Set();
+    AST_Set* rtn = new (reader->getAlloc()) AST_Set();
 
     rtn->col_offset = readColOffset(reader);
     readExprVector(rtn->elts, reader);
@@ -668,7 +700,7 @@ AST_Set* read_set(BufferedReader* reader) {
 }
 
 AST_SetComp* read_setcomp(BufferedReader* reader) {
-    AST_SetComp* rtn = new AST_SetComp();
+    AST_SetComp* rtn = new (reader->getAlloc()) AST_SetComp();
 
     rtn->col_offset = readColOffset(reader);
     rtn->elt = readASTExpr(reader);
@@ -678,7 +710,7 @@ AST_SetComp* read_setcomp(BufferedReader* reader) {
 }
 
 AST_Slice* read_slice(BufferedReader* reader) {
-    AST_Slice* rtn = new AST_Slice();
+    AST_Slice* rtn = new (reader->getAlloc()) AST_Slice();
 
     rtn->col_offset = -1;
     rtn->lineno = -1;
@@ -690,7 +722,7 @@ AST_Slice* read_slice(BufferedReader* reader) {
 }
 
 AST_Str* read_str(BufferedReader* reader) {
-    AST_Str* rtn = new AST_Str();
+    AST_Str* rtn = new (reader->getAlloc()) AST_Str();
 
     rtn->str_type = (AST_Str::StrType)reader->readByte();
 
@@ -709,19 +741,19 @@ AST_Str* read_str(BufferedReader* reader) {
 }
 
 AST_Subscript* read_subscript(BufferedReader* reader) {
-    AST_Subscript* rtn = new AST_Subscript();
+    AST_Subscript* rtn = new (reader->getAlloc()) AST_Subscript();
 
     rtn->col_offset = readColOffset(reader);
     rtn->ctx_type = (AST_TYPE::AST_TYPE)reader->readByte();
     rtn->lineno = reader->readULL();
-    rtn->slice = readASTExpr(reader);
+    rtn->slice = readASTSlice(reader);
     rtn->value = readASTExpr(reader);
 
     return rtn;
 }
 
 AST_TryExcept* read_tryexcept(BufferedReader* reader) {
-    AST_TryExcept* rtn = new AST_TryExcept();
+    AST_TryExcept* rtn = new (reader->getAlloc()) AST_TryExcept();
 
     readStmtVector(rtn->body, reader);
     rtn->col_offset = readColOffset(reader);
@@ -732,7 +764,7 @@ AST_TryExcept* read_tryexcept(BufferedReader* reader) {
 }
 
 AST_TryFinally* read_tryfinally(BufferedReader* reader) {
-    AST_TryFinally* rtn = new AST_TryFinally();
+    AST_TryFinally* rtn = new (reader->getAlloc()) AST_TryFinally();
 
     readStmtVector(rtn->body, reader);
     rtn->col_offset = readColOffset(reader);
@@ -742,7 +774,7 @@ AST_TryFinally* read_tryfinally(BufferedReader* reader) {
 }
 
 AST_Tuple* read_tuple(BufferedReader* reader) {
-    AST_Tuple* rtn = new AST_Tuple();
+    AST_Tuple* rtn = new (reader->getAlloc()) AST_Tuple();
 
     rtn->col_offset = readColOffset(reader);
     rtn->ctx_type = (AST_TYPE::AST_TYPE)reader->readByte();
@@ -753,7 +785,7 @@ AST_Tuple* read_tuple(BufferedReader* reader) {
 }
 
 AST_UnaryOp* read_unaryop(BufferedReader* reader) {
-    AST_UnaryOp* rtn = new AST_UnaryOp();
+    AST_UnaryOp* rtn = new (reader->getAlloc()) AST_UnaryOp();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
@@ -764,7 +796,7 @@ AST_UnaryOp* read_unaryop(BufferedReader* reader) {
 }
 
 AST_While* read_while(BufferedReader* reader) {
-    AST_While* rtn = new AST_While();
+    AST_While* rtn = new (reader->getAlloc()) AST_While();
 
     readStmtVector(rtn->body, reader);
     rtn->col_offset = readColOffset(reader);
@@ -776,7 +808,7 @@ AST_While* read_while(BufferedReader* reader) {
 }
 
 AST_With* read_with(BufferedReader* reader) {
-    AST_With* rtn = new AST_With();
+    AST_With* rtn = new (reader->getAlloc()) AST_With();
 
     readStmtVector(rtn->body, reader);
     rtn->col_offset = readColOffset(reader);
@@ -788,13 +820,39 @@ AST_With* read_with(BufferedReader* reader) {
 }
 
 AST_Yield* read_yield(BufferedReader* reader) {
-    AST_Yield* rtn = new AST_Yield();
+    AST_Yield* rtn = new (reader->getAlloc()) AST_Yield();
 
     rtn->col_offset = readColOffset(reader);
     rtn->lineno = reader->readULL();
     rtn->value = readASTExpr(reader);
 
     return rtn;
+}
+
+AST_slice* readASTSlice(BufferedReader* reader) {
+    uint8_t type = reader->readByte();
+    if (VERBOSITY("parsing") >= 3)
+        printf("type = %d\n", type);
+    if (type == 0)
+        return NULL;
+
+    uint8_t checkbyte = reader->readByte();
+    assert(checkbyte == 0xae);
+
+    switch (type) {
+        case AST_TYPE::Ellipsis:
+            return read_ellipsis(reader);
+        case AST_TYPE::ExtSlice:
+            return read_extslice(reader);
+        case AST_TYPE::Index:
+            return read_index(reader);
+        case AST_TYPE::Slice:
+            return read_slice(reader);
+        default:
+            fprintf(stderr, "Unknown slice node type (parser.cpp:" STRINGIFY(__LINE__) "): %d\n", type);
+            abort();
+            break;
+    }
 }
 
 AST_expr* readASTExpr(BufferedReader* reader) {
@@ -822,14 +880,10 @@ AST_expr* readASTExpr(BufferedReader* reader) {
             return read_dict(reader);
         case AST_TYPE::DictComp:
             return read_dictcomp(reader);
-        case AST_TYPE::ExtSlice:
-            return read_extslice(reader);
         case AST_TYPE::GeneratorExp:
             return read_generatorexp(reader);
         case AST_TYPE::IfExp:
             return read_ifexp(reader);
-        case AST_TYPE::Index:
-            return read_index(reader);
         case AST_TYPE::Lambda:
             return read_lambda(reader);
         case AST_TYPE::List:
@@ -846,8 +900,6 @@ AST_expr* readASTExpr(BufferedReader* reader) {
             return read_set(reader);
         case AST_TYPE::SetComp:
             return read_setcomp(reader);
-        case AST_TYPE::Slice:
-            return read_slice(reader);
         case AST_TYPE::Str:
             return read_str(reader);
         case AST_TYPE::Subscript:
@@ -959,98 +1011,48 @@ AST* readASTMisc(BufferedReader* reader) {
     }
 }
 
-static std::string getParserCommandLine(const char* fn) {
-    llvm::SmallString<128> parse_ast_fn;
-    // TODO supposed to pass argv0, main_addr to this function:
-    parse_ast_fn = llvm::sys::fs::getMainExecutable(NULL, NULL);
-    assert(parse_ast_fn.size() && "could not find the path to the pyston src dir");
+std::pair<AST_Module*, std::unique_ptr<ASTAllocator>> parse_string(const char* code, FutureFlags inherited_flags) {
+    inherited_flags &= ~(CO_NESTED | CO_FUTURE_DIVISION);
 
-    // Start by removing the binary name, because the "pyston" binary will break the logic below
-    llvm::sys::path::remove_filename(parse_ast_fn);
-
-    llvm::sys::path::append(parse_ast_fn, "src/codegen/parse_ast.py");
-
-    // We may be running in an environment where "python" resolves to pyston (ex in
-    // a virtualenv), so try to hard code the path to CPython.
-    // This should probably be a configure-time check?
-    return std::string("/usr/bin/python -S ") + parse_ast_fn.str().str() + " " + fn;
+    PyCompilerFlags cf;
+    cf.cf_flags = inherited_flags;
+    ArenaWrapper arena;
+    assert(arena);
+    const char* fn = "<string>";
+    mod_ty mod = PyParser_ASTFromString(code, fn, Py_file_input, &cf, arena);
+    if (!mod)
+        throwCAPIException();
+    assert(mod->kind != Interactive_kind);
+    auto t = cpythonToPystonAST(mod, fn);
+    return std::make_pair((AST_Module*)t.first, std::move(t.second));
 }
 
-AST_Module* parse_string(const char* code) {
-    int size = strlen(code);
-    char buf[] = "pystontmp_XXXXXX";
-    char* tmpdir = mkdtemp(buf);
-    assert(tmpdir);
-    std::string tmp = std::string(tmpdir) + "/in.py";
-    if (VERBOSITY() >= 3) {
-        printf("writing %d bytes to %s\n", size, tmp.c_str());
-    }
-
-    FILE* f = fopen(tmp.c_str(), "w");
-    fwrite(code, 1, size, f);
-    fputc('\n', f);
-    fclose(f);
-
-    AST_Module* m = parse_file(tmp.c_str());
-    removeDirectoryIfExists(tmpdir);
-
-    return m;
-}
-
-AST_Module* parse_file(const char* fn) {
+std::pair<AST_Module*, std::unique_ptr<ASTAllocator>> parse_file(const char* fn, FutureFlags inherited_flags) {
     Timer _t("parsing");
 
-    if (ENABLE_PYPA_PARSER) {
-        AST_Module* rtn = pypa_parse(fn);
-        RELEASE_ASSERT(rtn, "unknown parse error (possibly: '%s'?)", strerror(errno));
-        return rtn;
-    }
-
-    FILE* fp = popen(getParserCommandLine(fn).c_str(), "r");
-
-    BufferedReader* reader = new BufferedReader(fp);
-    AST* rtn = readASTMisc(reader);
-    reader->fill();
-    ASSERT(reader->bytesBuffered() == 0, "%d", reader->bytesBuffered());
-    delete reader;
-
-    int code = pclose(fp);
-    assert(code == 0);
-
-    assert(rtn->type == AST_TYPE::Module);
-
-    long us = _t.end();
-    static StatCounter us_parsing("us_parsing");
-    us_parsing.log(us);
-
-    return ast_cast<AST_Module>(rtn);
+    FileHandle fp(fn, "r");
+    PyCompilerFlags cf;
+    cf.cf_flags = inherited_flags;
+    ArenaWrapper arena;
+    assert(arena);
+    mod_ty mod = PyParser_ASTFromFile(fp, fn, Py_file_input, 0, 0, &cf, NULL, arena);
+    if (!mod)
+        throwCAPIException();
+    assert(mod->kind != Interactive_kind);
+    auto t = cpythonToPystonAST(mod, fn);
+    return std::make_pair((AST_Module*)t.first, std::move(t.second));
 }
-
-const char* getMagic() {
-    if (ENABLE_PYPA_PARSER)
-        return "a\ncM";
-    else
-        return "a\ncm";
-}
-
-#define MAGIC_STRING_LENGTH 4
-#define LENGTH_LENGTH sizeof(int)
-#define CHECKSUM_LENGTH 1
 
 // Does at least one of: returns a valid file_data vector, or fills in 'module'
-static std::vector<char> _reparse(const char* fn, const std::string& cache_fn, AST_Module*& module) {
-    FILE* cache_fp = fopen(cache_fn.c_str(), "w");
-
-    if (DEBUG_PARSING) {
-        fprintf(stderr, "_reparse('%s', '%s'), pypa=%d\n", fn, cache_fn.c_str(), ENABLE_PYPA_PARSER);
-        fprintf(stderr, "writing magic string: %d %d %d %d\n", getMagic()[0], getMagic()[1], getMagic()[2],
-                getMagic()[3]);
-    }
+static std::vector<char> _reparse(const char* fn, const std::string& cache_fn, AST_Module*& module,
+                                  std::unique_ptr<ASTAllocator>& ast_allocator, FutureFlags inherited_flags) {
+    inherited_flags &= ~(CO_NESTED | CO_FUTURE_DIVISION);
+    FileHandle cache_fp(cache_fn.c_str(), "w");
 
     std::vector<char> file_data;
     if (cache_fp)
-        fwrite(getMagic(), 1, MAGIC_STRING_LENGTH, cache_fp);
-    file_data.insert(file_data.end(), getMagic(), getMagic() + MAGIC_STRING_LENGTH);
+        fwrite(MAGIC, 1, MAGIC_STRING_LENGTH, cache_fp);
+    file_data.insert(file_data.end(), MAGIC, MAGIC + MAGIC_STRING_LENGTH);
 
     int checksum_start = file_data.size();
 
@@ -1068,36 +1070,25 @@ static std::vector<char> _reparse(const char* fn, const std::string& cache_fn, A
     file_data.insert(file_data.end(), (char*)&checksum, (char*)&checksum + CHECKSUM_LENGTH);
     checksum = 0;
 
-    if (ENABLE_PYPA_PARSER) {
-        module = pypa_parse(fn);
-        RELEASE_ASSERT(module, "unknown parse error");
+    FileHandle fp(fn, "r");
+    PyCompilerFlags cf;
+    cf.cf_flags = inherited_flags;
+    ArenaWrapper arena;
+    assert(arena);
+    mod_ty mod = PyParser_ASTFromFile(fp, fn, Py_file_input, 0, 0, &cf, NULL, arena);
+    if (!mod)
+        throwCAPIException();
+    assert(mod->kind != Interactive_kind);
+    auto t = cpythonToPystonAST(mod, fn);
+    module = static_cast<AST_Module*>(t.first);
+    ast_allocator = std::move(t.second);
 
-        if (!cache_fp)
-            return std::vector<char>();
+    if (!cache_fp)
+        return std::vector<char>();
 
-        auto p = serializeAST(module, cache_fp);
-        checksum = p.second;
-        bytes_written += p.first;
-    } else {
-        FILE* parser = popen(getParserCommandLine(fn).c_str(), "r");
-        char buf[80];
-        while (true) {
-            int nread = fread(buf, 1, 80, parser);
-            if (nread == 0)
-                break;
-            bytes_written += nread;
-
-            if (cache_fp)
-                fwrite(buf, 1, nread, cache_fp);
-            file_data.insert(file_data.end(), buf, buf + nread);
-
-            for (int i = 0; i < nread; i++) {
-                checksum ^= buf[i];
-            }
-        }
-        int code = pclose(parser);
-        assert(code == 0);
-    }
+    auto p = serializeAST(module, cache_fp);
+    checksum = p.second;
+    bytes_written += p.first;
 
     fseek(cache_fp, checksum_start, SEEK_SET);
     if (cache_fp)
@@ -1107,20 +1098,15 @@ static std::vector<char> _reparse(const char* fn, const std::string& cache_fn, A
         fwrite(&checksum, 1, CHECKSUM_LENGTH, cache_fp);
     memcpy(&file_data[checksum_start + LENGTH_LENGTH], &checksum, CHECKSUM_LENGTH);
 
-    if (cache_fp)
-        fclose(cache_fp);
-    return std::move(file_data);
+    return file_data;
 }
 
 // Parsing the file is somewhat expensive since we have to shell out to cpython;
 // it's not a huge deal right now, but this caching version can significantly cut down
 // on the startup time (40ms -> 10ms).
-AST_Module* caching_parse_file(const char* fn) {
+std::pair<AST_Module*, std::unique_ptr<ASTAllocator>> caching_parse_file(const char* fn, FutureFlags inherited_flags,
+                                                                         bool force_reparse) {
     std::ostringstream oss;
-    if (DEBUG_PARSING) {
-        oss << "caching_parse_file() on " << fn << '\n';
-        fprintf(stderr, "caching_parse_file('%s'), pypa=%d\n", fn, ENABLE_PYPA_PARSER);
-    }
 
     UNAVOIDABLE_STAT_TIMER(t0, "us_timer_caching_parse_file");
     static StatCounter us_parsing("us_parsing");
@@ -1140,7 +1126,8 @@ AST_Module* caching_parse_file(const char* fn) {
                           && cache_stat.st_mtim.tv_nsec > source_stat.st_mtim.tv_nsec))) {
         oss << "reading pyc file\n";
         char buf[1024];
-        FILE* cache_fp = fopen(cache_fn.c_str(), "r");
+
+        FileHandle cache_fp(cache_fn.c_str(), "r");
         if (cache_fp) {
             while (true) {
                 int read = fread(buf, 1, 1024, cache_fp);
@@ -1150,15 +1137,15 @@ AST_Module* caching_parse_file(const char* fn) {
                     if (ferror(cache_fp)) {
                         oss << "encountered io error reading from the file\n";
                         AST_Module* mod = 0;
-                        file_data = _reparse(fn, cache_fn, mod);
+                        std::unique_ptr<ASTAllocator> ast_allocator;
+                        file_data = _reparse(fn, cache_fn, mod, ast_allocator, inherited_flags);
                         if (mod)
-                            return mod;
+                            return std::make_pair(mod, std::move(ast_allocator));
                         assert(file_data.size());
                     }
                     break;
                 }
             }
-            fclose(cache_fp);
         }
     }
 
@@ -1176,12 +1163,12 @@ AST_Module* caching_parse_file(const char* fn) {
         }
 
         if (good) {
-            if (strncmp(&file_data[0], getMagic(), MAGIC_STRING_LENGTH) != 0) {
+            if (strncmp(&file_data[0], MAGIC, MAGIC_STRING_LENGTH) != 0) {
                 oss << "magic string did not match\n";
-                if (VERBOSITY() || tries == MAX_TRIES) {
+                if (VERBOSITY() >= 2 || tries == MAX_TRIES) {
                     fprintf(stderr, "Warning: corrupt or non-Pyston .pyc file found; ignoring\n");
                     fprintf(stderr, "%d %d %d %d\n", file_data[0], file_data[1], file_data[2], file_data[3]);
-                    fprintf(stderr, "%d %d %d %d\n", getMagic()[0], getMagic()[1], getMagic()[2], getMagic()[3]);
+                    fprintf(stderr, "%d %d %d %d\n", MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3]);
                 }
                 good = false;
             }
@@ -1231,7 +1218,7 @@ AST_Module* caching_parse_file(const char* fn) {
 
             if (rtn && reader->bytesBuffered() == 0) {
                 assert(rtn->type == AST_TYPE::Module);
-                return ast_cast<AST_Module>(rtn);
+                return std::make_pair(ast_cast<AST_Module>(rtn), std::move(reader->ast_allocator));
             }
 
             oss << "returned NULL module\n";
@@ -1253,9 +1240,10 @@ AST_Module* caching_parse_file(const char* fn) {
             file_data.clear();
 
             AST_Module* mod = 0;
-            file_data = _reparse(fn, cache_fn, mod);
+            std::unique_ptr<ASTAllocator> ast_allocator;
+            file_data = _reparse(fn, cache_fn, mod, ast_allocator, inherited_flags);
             if (mod)
-                return mod;
+                return std::make_pair(mod, std::move(ast_allocator));
             assert(file_data.size());
         }
     }

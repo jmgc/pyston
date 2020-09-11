@@ -11,9 +11,9 @@ extern "C" {
 PyAPI_FUNC(long) PyImport_GetMagicNumber(void) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyImport_ExecCodeModule(const char *name, PyObject *co) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyImport_ExecCodeModuleEx(
-	char *name, PyObject *co, char *pathname) PYSTON_NOEXCEPT;
-PyAPI_FUNC(PyObject *) PyImport_GetModuleDict(void) PYSTON_NOEXCEPT;
-PyAPI_FUNC(PyObject *) PyImport_AddModule(const char *name) PYSTON_NOEXCEPT;
+    const char *name, PyObject *co, char *pathname) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject *)) PyImport_GetModuleDict(void) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject *)) PyImport_AddModule(const char *name) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyImport_ImportModule(const char *name) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyImport_ImportModuleNoBlock(const char *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyImport_ImportModuleLevel(const char *name,
@@ -26,7 +26,7 @@ PyAPI_FUNC(PyObject *) PyImport_GetImporter(PyObject *path) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyImport_Import(PyObject *name) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyImport_ReloadModule(PyObject *m) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) PyImport_Cleanup(void) PYSTON_NOEXCEPT;
-PyAPI_FUNC(int) PyImport_ImportFrozenModule(char *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(int) PyImport_ImportFrozenModule(const char *) PYSTON_NOEXCEPT;
 
 #ifdef WITH_THREAD
 PyAPI_FUNC(void) _PyImport_AcquireLock(void) PYSTON_NOEXCEPT;
@@ -45,12 +45,11 @@ PyAPI_FUNC(PyObject *) _PyImport_FindExtension(char *, char *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) _PyImport_FixupExtension(char *, char *) PYSTON_NOEXCEPT;
 
 struct _inittab {
-    char *name;
+    const char *name;
     void (*initfunc)(void);
 };
 
-// Pyston change: this is no longer a static object
-//PyAPI_DATA(PyTypeObject) PyNullImporter_Type;
+PyAPI_DATA(PyTypeObject) PyNullImporter_Type;
 PyAPI_DATA(struct _inittab *) PyImport_Inittab;
 
 PyAPI_FUNC(int) PyImport_AppendInittab(const char *name, void (*initfunc)(void)) PYSTON_NOEXCEPT;

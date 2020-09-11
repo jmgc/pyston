@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,18 +28,12 @@ static_assert(sizeof(int64_t) == sizeof(long), "");
 #define PYSTON_INT_MAX LONG_MAX
 
 extern "C" Box* div_i64_i64(i64 lhs, i64 rhs);
-extern "C" i64 mod_i64_i64(i64 lhs, i64 rhs);
+extern "C" Box* mod_i64_i64(i64 lhs, i64 rhs);
 
 extern "C" Box* add_i64_i64(i64 lhs, i64 rhs);
 extern "C" Box* sub_i64_i64(i64 lhs, i64 rhs);
-extern "C" Box* pow_i64_i64(i64 lhs, i64 rhs, Box* mod = None);
+extern "C" Box* pow_i64_i64(i64 lhs, i64 rhs, Box* mod = Py_None);
 extern "C" Box* mul_i64_i64(i64 lhs, i64 rhs);
-extern "C" i1 eq_i64_i64(i64 lhs, i64 rhs);
-extern "C" i1 ne_i64_i64(i64 lhs, i64 rhs);
-extern "C" i1 lt_i64_i64(i64 lhs, i64 rhs);
-extern "C" i1 le_i64_i64(i64 lhs, i64 rhs);
-extern "C" i1 gt_i64_i64(i64 lhs, i64 rhs);
-extern "C" i1 ge_i64_i64(i64 lhs, i64 rhs);
 extern "C" Box* intAdd(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intAnd(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intDiv(BoxedInt* lhs, Box* rhs);
@@ -52,8 +46,10 @@ extern "C" Box* intGe(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intLShift(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intMod(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intMul(BoxedInt* lhs, Box* rhs);
+extern "C" Box* intOr(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intRShift(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intSub(BoxedInt* lhs, Box* rhs);
+extern "C" Box* intXor(BoxedInt* lhs, Box* rhs);
 extern "C" Box* intInvert(BoxedInt* v);
 extern "C" Box* intPos(BoxedInt* v);
 extern "C" Box* intNeg(BoxedInt* v);

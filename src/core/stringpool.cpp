@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,8 @@ namespace pyston {
 
 InternedString InternedStringPool::get(llvm::StringRef arg) {
     // HACK: should properly track this liveness:
-    BoxedString* s = internStringImmortal(arg);
+    // XXX it's not a static string
+    BoxedString* s = getStaticString(arg);
 
 #ifndef NDEBUG
     return InternedString(s, this);
@@ -35,5 +36,10 @@ llvm::StringRef InternedString::s() const {
 
 const char* InternedString::c_str() const {
     return _str->c_str();
+}
+
+bool InternedString::isCompilerCreatedName() const {
+    char c = _str->s()[0];
+    return c == '!' || c == '#';
 }
 }

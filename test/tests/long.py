@@ -70,6 +70,7 @@ print pow(-5,  3, 7L)
 print pow(-5,  3, -7L)
 print (11L).__pow__(32, 50L)
 print (11L).__index__()
+print (11L).__rtruediv__(0)
 
 print long("100", 16)
 print long("100", 10)
@@ -122,3 +123,85 @@ a = 2389134823414823408429384238403228392384028439480234823
 print +a
 print +long.__new__(C, 5L)
 print type(+long.__new__(C, 5L))
+
+print((0L).bit_length())
+
+values = [float('inf'), float('-inf'), float('nan'), None]
+
+for v in values:
+    try:
+        long(v)
+    except Exception as e:
+        print(e.message)
+
+
+class long2(long):
+    pass
+
+# Overflowing int conversion must return long not long subtype.
+x = long2(1L << 100)
+y = int(x)
+print(type(y))
+
+print(long(unicode("-3")))
+
+print(long(x=10))
+print(long(x="10", base=10))
+
+try:
+    print(long('hek2mgl', 22))
+except Exception as e:
+    print(e.message)
+
+print(long('hek2mgl', 23))
+print(long('hek2mgl', 24))
+
+for i in range(-10, 10):
+    print(hash((-1 << 63) + i))
+    print(hash((1 << 63) + i))
+
+for i in xrange(100):
+    for j in xrange(100):
+        print i, j, hash((1 << i) - (1 << j))
+
+pow_test_data = [42L, 3, 4.5, "x", 0, -42, None]
+
+for rhs in pow_test_data:
+    for lhs in pow_test_data:
+        for mod in pow_test_data:
+            try:
+                print(long.__rpow__(rhs, lhs, mod))
+            except Exception as e:
+                print(e.message)
+
+unary_test_data = [-42, -0, 0, 42]
+
+for i in unary_test_data:
+    print(int.__abs__(i))
+    print(int.__long__(i))
+
+data = ["-1L", "0L", "1L",
+        "42L", "-42L",
+        "42.0", "5", "0", "5+5j", "0.0",
+        "\"42\"", "None",
+        ]
+
+operations = ["__rpow__",
+              "__rshift__",
+              "__lshift__",
+              "__rrshift__",
+              "__rlshift__",
+              "__coerce__",
+              ]
+
+for x in data:
+    for y in data:
+        for operation in operations:
+            try:
+                print(eval("long.{op}({arg1}, {arg2})".format(op=operation,
+                                                               arg1=x,
+                                                               arg2=y)))
+            except Exception as e:
+                print(e.message)
+
+print(long.__format__(130L, 'd'))

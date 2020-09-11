@@ -4,6 +4,7 @@
 
 #include "Python.h"
 #include "compile.h" /* required only for 2.3, as it seems */
+
 #include "frameobject.h"
 
 #include <ffi.h>
@@ -164,7 +165,11 @@ void _ctypes_add_traceback(char *funcname, char *filename, int lineno)
         0                    /*PyObject *locals*/
         );
     if (!py_frame) goto bad;
-    py_frame->f_lineno = lineno;
+
+    // Pyston change:
+    // py_frame->f_lineno = lineno;
+    PyFrame_SetLineNumber(py_frame, lineno);
+
     PyTraceBack_Here(py_frame);
   bad:
     Py_XDECREF(py_globals);

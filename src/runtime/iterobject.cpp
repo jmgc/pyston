@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@
 #include "core/options.h"
 #include "core/stats.h"
 #include "core/types.h"
-#include "gc/collector.h"
 #include "runtime/inline/boxing.h"
 #include "runtime/objmodel.h"
 #include "runtime/types.h"
@@ -38,29 +37,44 @@ BoxedClass* iterwrapper_cls;
 
 Box* seqiterIter(Box* s) {
     RELEASE_ASSERT(s->cls == seqiter_cls || s->cls == seqreviter_cls, "");
-    return s;
+    return incref(s);
 }
 
-bool seqiterHasnextUnboxed(Box* s) {
+static llvm_compat_bool seqiterHasnextUnboxed(Box* s) {
     RELEASE_ASSERT(s->cls == seqiter_cls || s->cls == seqreviter_cls, "");
     BoxedSeqIter* self = static_cast<BoxedSeqIter*>(s);
 
-    if (!self->b) {
+    if (!self->b)
         return false;
+
+    if (self->len != -1) {
+        if (self->idx >= self->len)
+            return false;
+        assert(!self->next);
+        if (self->b->cls == str_cls)
+            self->next = incref(characters[static_cast<BoxedString*>(self->b)->s()[self->idx] & UCHAR_MAX]);
+        else if (self->b->cls == unicode_cls)
+            self->next = PyUnicode_FromUnicode(&reinterpret_cast<PyUnicodeObject*>(self->b)->str[self->idx], 1);
+        else
+            self->next = PySequence_GetItem(self->b, self->idx);
+        assert(self->next);
+        self->idx++;
+        return true;
     }
 
-    Box* next = getitemInternal<ExceptionStyle::CAPI>(self->b, boxInt(self->idx), NULL);
+    // TODO: inline PySequence_GetItem
+    Box* next = PySequence_GetItem(self->b, self->idx);
     if (!next) {
         if (PyErr_ExceptionMatches(IndexError) || PyErr_ExceptionMatches(StopIteration)) {
             PyErr_Clear();
-            self->b = NULL;
+            Py_CLEAR(self->b);
             return false;
-        } else {
-            throwCAPIException();
         }
+        throwCAPIException();
     }
 
     self->idx++;
+    RELEASE_ASSERT(!self->next, "");
     self->next = next;
     return true;
 }
@@ -69,41 +83,55 @@ Box* seqiterHasnext(Box* s) {
     return boxBool(seqiterHasnextUnboxed(s));
 }
 
-Box* seqreviterHasnext(Box* s) {
+Box* seqreviterHasnext_capi(Box* s) noexcept {
     RELEASE_ASSERT(s->cls == seqiter_cls || s->cls == seqreviter_cls, "");
     BoxedSeqIter* self = static_cast<BoxedSeqIter*>(s);
 
     if (self->idx == -1 || !self->b)
-        return False;
-    Box* next;
-    try {
-        next = getitem(self->b, boxInt(self->idx));
-    } catch (ExcInfo e) {
-        if (e.matches(IndexError) || e.matches(StopIteration)) {
-            self->b = NULL;
-            return False;
-        } else
-            throw e;
+        Py_RETURN_FALSE;
+
+    Box* next = PySequence_GetItem(self->b, self->idx);
+    if (!next) {
+        if (PyErr_ExceptionMatches(IndexError) || PyErr_ExceptionMatches(StopIteration)) {
+            PyErr_Clear();
+            Py_CLEAR(self->b);
+            Py_RETURN_FALSE;
+        }
+        return NULL;
     }
     self->idx--;
+    RELEASE_ASSERT(!self->next, "");
     self->next = next;
-    return True;
+    Py_RETURN_TRUE;
 }
 
-Box* seqiterNext(Box* s) {
+Box* seqreviterHasnext(Box* s) {
+    Box* rtn = seqreviterHasnext_capi(s);
+    if (!rtn)
+        throwCAPIException();
+    return rtn;
+}
+
+Box* seqiter_next(Box* s) noexcept {
     RELEASE_ASSERT(s->cls == seqiter_cls || s->cls == seqreviter_cls, "");
     BoxedSeqIter* self = static_cast<BoxedSeqIter*>(s);
 
     if (!self->next) {
-        Box* hasnext = NULL;
-        if (s->cls == seqiter_cls)
-            hasnext = seqiterHasnext(s);
-        else if (s->cls == seqreviter_cls)
-            hasnext = seqreviterHasnext(s);
-        else
-            RELEASE_ASSERT(0, "");
-        if (hasnext == False)
-            raiseExcHelper(StopIteration, "");
+        bool hasnext;
+        try {
+            if (s->cls == seqiter_cls)
+                hasnext = seqiterHasnextUnboxed(s);
+            else if (s->cls == seqreviter_cls)
+                hasnext = unboxBool(autoDecref(seqreviterHasnext(s)));
+            else
+                RELEASE_ASSERT(0, "");
+        } catch (ExcInfo e) {
+            setCAPIException(e);
+            return NULL;
+        }
+
+        if (!hasnext)
+            return NULL;
     }
 
     RELEASE_ASSERT(self->next, "");
@@ -112,31 +140,19 @@ Box* seqiterNext(Box* s) {
     return r;
 }
 
-static void seqiterGCVisit(GCVisitor* v, Box* b) {
-    assert(b->cls == seqiter_cls || b->cls == seqreviter_cls);
-    boxGCHandler(v, b);
-
-    BoxedSeqIter* si = static_cast<BoxedSeqIter*>(b);
-    v->visit(si->b);
-    if (si->next)
-        v->visit(si->next);
+Box* seqiterNext(Box* s) {
+    Box* rtn = seqiter_next(s);
+    if (!rtn)
+        raiseExcHelper(StopIteration, (const char*)NULL);
+    return rtn;
 }
 
-static void iterwrapperGCVisit(GCVisitor* v, Box* b) {
-    assert(b->cls == iterwrapper_cls);
-    boxGCHandler(v, b);
-
-    BoxedIterWrapper* iw = static_cast<BoxedIterWrapper*>(b);
-    v->visit(iw->iter);
-    if (iw->next)
-        v->visit(iw->next);
-}
-
-bool iterwrapperHasnextUnboxed(Box* s) {
+llvm_compat_bool iterwrapperHasnextUnboxed(Box* s) {
     RELEASE_ASSERT(s->cls == iterwrapper_cls, "");
     BoxedIterWrapper* self = static_cast<BoxedIterWrapper*>(s);
 
     Box* next = PyIter_Next(self->iter);
+    RELEASE_ASSERT(!self->next, "");
     self->next = next;
     if (!next) {
         if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration))
@@ -150,14 +166,22 @@ Box* iterwrapperHasnext(Box* s) {
     return boxBool(iterwrapperHasnextUnboxed(s));
 }
 
-Box* iterwrapperNext(Box* s) {
+Box* iterwrapper_next(Box* s) noexcept {
     RELEASE_ASSERT(s->cls == iterwrapper_cls, "");
     BoxedIterWrapper* self = static_cast<BoxedIterWrapper*>(s);
 
-    RELEASE_ASSERT(self->next, "");
+    if (!self->next)
+        return NULL;
     Box* r = self->next;
     self->next = NULL;
     return r;
+}
+
+Box* iterwrapperNext(Box* s) {
+    Box* rtn = iterwrapper_next(s);
+    if (!rtn)
+        raiseExcHelper(StopIteration, (const char*)NULL);
+    return rtn;
 }
 
 extern "C" PyObject* PySeqIter_New(PyObject* seq) noexcept {
@@ -169,7 +193,7 @@ extern "C" PyObject* PySeqIter_New(PyObject* seq) noexcept {
     }
 }
 
-bool calliter_hasnext(Box* b) {
+llvm_compat_bool calliterHasnextUnboxed(Box* b) {
     calliterobject* it = (calliterobject*)b;
     if (!it->it_nextvalue) {
         it->it_nextvalue = calliter_next(it);
@@ -182,33 +206,48 @@ bool calliter_hasnext(Box* b) {
 
 
 void setupIter() {
-    seqiter_cls
-        = BoxedHeapClass::create(type_cls, object_cls, seqiterGCVisit, 0, 0, sizeof(BoxedSeqIter), false, "iterator");
+    seqiter_cls = BoxedClass::create(type_cls, object_cls, 0, 0, sizeof(BoxedSeqIter), false, "iterator", false,
+                                     (destructor)BoxedSeqIter::dealloc, NULL, true,
+                                     (traverseproc)BoxedSeqIter::traverse, NOCLEAR);
 
-    seqiter_cls->giveAttr("next", new BoxedFunction(boxRTFunction((void*)seqiterNext, UNKNOWN, 1)));
-    seqiter_cls->giveAttr("__hasnext__", new BoxedFunction(boxRTFunction((void*)seqiterHasnext, BOXED_BOOL, 1)));
-    seqiter_cls->giveAttr("__iter__", new BoxedFunction(boxRTFunction((void*)seqiterIter, UNKNOWN, 1)));
+    seqiter_cls->giveAttr("next", new BoxedFunction(BoxedCode::create((void*)seqiterNext, UNKNOWN, 1, "seqiter.next")));
+    BoxedCode* hasnext = BoxedCode::create((void*)seqiterHasnextUnboxed, BOOL, 1, "seqiter.__hasnext__");
+    hasnext->addVersion((void*)seqiterHasnext, BOXED_BOOL);
+    seqiter_cls->giveAttr("__hasnext__", new BoxedFunction(hasnext));
+    seqiter_cls->giveAttr("__iter__",
+                          new BoxedFunction(BoxedCode::create((void*)seqiterIter, UNKNOWN, 1, "seqiter.__iter__")));
 
     seqiter_cls->freeze();
     seqiter_cls->tpp_hasnext = seqiterHasnextUnboxed;
+    seqiter_cls->tp_iter = PyObject_SelfIter;
+    seqiter_cls->tp_iternext = seqiter_next;
 
-    seqreviter_cls
-        = BoxedHeapClass::create(type_cls, object_cls, seqiterGCVisit, 0, 0, sizeof(BoxedSeqIter), false, "reversed");
+    seqreviter_cls = BoxedClass::create(type_cls, object_cls, 0, 0, sizeof(BoxedSeqIter), false, "reversed", true,
+                                        (destructor)BoxedSeqIter::dealloc, NULL, true,
+                                        (traverseproc)BoxedSeqIter::traverse, NOCLEAR);
 
-    seqreviter_cls->giveAttr("next", new BoxedFunction(boxRTFunction((void*)seqiterNext, UNKNOWN, 1)));
-    seqreviter_cls->giveAttr("__hasnext__", new BoxedFunction(boxRTFunction((void*)seqreviterHasnext, BOXED_BOOL, 1)));
-    seqreviter_cls->giveAttr("__iter__", new BoxedFunction(boxRTFunction((void*)seqiterIter, UNKNOWN, 1)));
+    seqreviter_cls->giveAttr("next",
+                             new BoxedFunction(BoxedCode::create((void*)seqiterNext, UNKNOWN, 1, "seqreviter.next")));
+    seqreviter_cls->giveAttr("__hasnext__", new BoxedFunction(BoxedCode::create((void*)seqreviterHasnext, BOXED_BOOL, 1,
+                                                                                "seqreviter.__hasnext__")));
+    seqreviter_cls->giveAttr(
+        "__iter__", new BoxedFunction(BoxedCode::create((void*)seqiterIter, UNKNOWN, 1, "seqreviter.__iter__")));
 
     seqreviter_cls->freeze();
+    seqreviter_cls->tp_iter = PyObject_SelfIter;
+    seqreviter_cls->tp_iternext = seqiter_next;
 
-    iterwrapper_cls = BoxedHeapClass::create(type_cls, object_cls, iterwrapperGCVisit, 0, 0, sizeof(BoxedIterWrapper),
-                                             false, "iterwrapper");
+    iterwrapper_cls = BoxedClass::create(type_cls, object_cls, 0, 0, sizeof(BoxedIterWrapper), false, "iterwrapper",
+                                         false, (destructor)BoxedIterWrapper::dealloc, NULL, true,
+                                         (traverseproc)BoxedIterWrapper::traverse, NOCLEAR);
 
-    iterwrapper_cls->giveAttr("next", new BoxedFunction(boxRTFunction((void*)iterwrapperNext, UNKNOWN, 1)));
-    iterwrapper_cls->giveAttr("__hasnext__",
-                              new BoxedFunction(boxRTFunction((void*)iterwrapperHasnext, BOXED_BOOL, 1)));
+    iterwrapper_cls->giveAttr(
+        "next", new BoxedFunction(BoxedCode::create((void*)iterwrapperNext, UNKNOWN, 1, "iterwrapper.next")));
+    iterwrapper_cls->giveAttr("__hasnext__", new BoxedFunction(BoxedCode::create((void*)iterwrapperHasnext, BOXED_BOOL,
+                                                                                 1, "iterwrapper.__hasnext__")));
 
     iterwrapper_cls->freeze();
     iterwrapper_cls->tpp_hasnext = iterwrapperHasnextUnboxed;
+    iterwrapper_cls->tp_iternext = iterwrapper_next;
 }
 }

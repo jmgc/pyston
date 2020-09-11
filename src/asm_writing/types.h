@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
 
 #ifndef PYSTON_ASMWRITING_TYPES_H
 #define PYSTON_ASMWRITING_TYPES_H
+
+#include <climits>
 
 #include "core/common.h"
 
@@ -33,6 +35,7 @@ namespace assembler {
 
 class Assembler;
 
+struct RegisterSet;
 struct Register {
     int regnum;
 
@@ -46,30 +49,84 @@ struct Register {
 
     void dump() const;
 
+    int getDwarfId() const;
     static Register fromDwarf(int dwarf_regnum);
 
     static constexpr int numRegs() { return 16; }
+
+    constexpr RegisterSet operator|(Register b) const;
 };
 
-const Register RAX(0);
-const Register RCX(1);
-const Register RDX(2);
-const Register RBX(3);
-const Register RSP(4);
-const Register RBP(5);
-const Register RSI(6);
-const Register RDI(7);
-const Register R8(8);
-const Register R9(9);
-const Register R10(10);
-const Register R11(11);
-const Register R12(12);
-const Register R13(13);
-const Register R14(14);
-const Register R15(15);
+constexpr Register RAX(0);
+constexpr Register RCX(1);
+constexpr Register RDX(2);
+constexpr Register RBX(3);
+constexpr Register RSP(4);
+constexpr Register RBP(5);
+constexpr Register RSI(6);
+constexpr Register RDI(7);
+constexpr Register R8(8);
+constexpr Register R9(9);
+constexpr Register R10(10);
+constexpr Register R11(11);
+constexpr Register R12(12);
+constexpr Register R13(13);
+constexpr Register R14(14);
+constexpr Register R15(15);
+
+struct RegisterSet {
+    typedef unsigned int Regs;
+    Regs regs;
+
+    constexpr explicit RegisterSet(Regs regs) : regs(regs) {}
+    constexpr RegisterSet(Register reg) : regs(1ul << reg.regnum) {}
+
+    static constexpr RegisterSet getCalleeSave() { return RBX | RSP | RBP | R12 | R13 | R14 | R15; }
+    static constexpr RegisterSet stdAllocatable() { return RAX | RCX | RDX | RDI | RSI | R8 | R9 | R10 | R11; }
+
+    bool isInside(Register reg) const { return regs & (1ul << reg.regnum); }
+    bool empty() const { return regs == 0; }
+
+    class iterator {
+    public:
+        const RegisterSet& set;
+        int i;
+        iterator(const RegisterSet& set, int i) : set(set), i(i) {}
+
+        iterator& operator++() {
+            do {
+                i++;
+            } while (i < Register::numRegs() && !set.isInside(Register(i)));
+            if (i > Register::numRegs())
+                i = Register::numRegs();
+            return *this;
+        }
+
+        bool operator==(const iterator& rhs) const { return i == rhs.i; }
+        bool operator!=(const iterator& rhs) const { return !(*this == rhs); }
+
+        Register operator*() { return Register(i); }
+    };
+
+    iterator begin() const {
+        if (empty())
+            return end();
+        return iterator(*this, __builtin_ctz(regs));
+    }
+    iterator end() const { return iterator(*this, Register::numRegs()); }
+
+    constexpr RegisterSet operator|(RegisterSet b) const { return RegisterSet(regs | b.regs); }
+    constexpr RegisterSet operator&(RegisterSet b) const { return RegisterSet(regs & b.regs); }
+    void operator|=(RegisterSet b) { regs |= b.regs; }
+    void operator&=(RegisterSet b) { regs &= b.regs; }
+};
+
+constexpr RegisterSet Register::operator|(Register b) const {
+    return RegisterSet(*this) | RegisterSet(b);
+}
 
 inline bool Register::isCalleeSave() {
-    return *this == RBX || *this == RSP || *this == RBP || regnum >= 12;
+    return RegisterSet::getCalleeSave().isInside(*this);
 }
 
 struct Indirect {
@@ -172,12 +229,99 @@ struct JumpDestination {
 
     int offset;
 
-    JumpDestination(OffsetType type, int64_t offset) : type(type), offset(offset) {
-        assert((-1L << 31) <= offset && offset < (1L << 31) - 1);
-    }
+    JumpDestination(OffsetType type, int64_t offset) : type(type), offset(offset) { assert(fitsInto<int32_t>(offset)); }
     static JumpDestination fromStart(int offset) { return JumpDestination(FROM_START, offset); }
 };
 }
+
+struct Location {
+public:
+    enum LocationType : uint8_t {
+        Register,
+        XMMRegister,
+        Stack,
+        Scratch, // stack location, relative to the scratch start
+
+        StackIndirect, // A location like $rsp[offset1][offset2]
+
+        // For representing constants that fit in 32-bits, that can be encoded as immediates
+        AnyReg,        // special type for use when specifying a location as a destination
+        None,          // special type that represents the lack of a location, ex where a "ret void" gets returned
+        Uninitialized, // special type for an uninitialized (and invalid) location
+    };
+
+public:
+    LocationType type;
+
+    union {
+        // only valid if type==Register; uses X86 numbering, not dwarf numbering.
+        // also valid if type==XMMRegister
+        int32_t regnum;
+        // only valid if type==Stack; this is the offset from bottom of the original frame.
+        // ie argument #6 will have a stack_offset of 0, #7 will have a stack offset of 8, etc.
+        // Measured in bytes
+        int32_t stack_offset;
+        // only valid if type == Scratch; offset from the beginning of the scratch area.
+        // Measured in bytes
+        int32_t scratch_offset;
+
+        // Only valid if type == StackIndirect:
+        struct {
+            int16_t stack_first_offset;
+            int16_t stack_second_offset;
+        };
+
+        int32_t _data;
+    };
+
+    constexpr Location() noexcept : type(Uninitialized), _data(-1) {}
+    constexpr Location(const Location& r) = default;
+    Location& operator=(const Location& r) = default;
+
+    constexpr Location(LocationType type, int32_t data) : type(type), _data(data) {}
+    Location(LocationType type, int64_t offset1, int64_t offset2)
+        : type(type), stack_first_offset(offset1), stack_second_offset(offset2) {
+        assert(type == StackIndirect);
+        assert(SHRT_MIN <= offset1 && offset1 <= SHRT_MAX);
+        assert(SHRT_MIN <= offset2 && offset2 <= SHRT_MAX);
+    }
+
+    constexpr Location(assembler::Register reg) : type(Register), regnum(reg.regnum) {}
+
+    constexpr Location(assembler::XMMRegister reg) : type(XMMRegister), regnum(reg.regnum) {}
+
+    constexpr Location(assembler::GenericRegister reg)
+        : type(reg.type == assembler::GenericRegister::GP ? Register : reg.type == assembler::GenericRegister::XMM
+                                                                           ? XMMRegister
+                                                                           : None),
+          regnum(reg.type == assembler::GenericRegister::GP ? reg.gp.regnum : reg.xmm.regnum) {}
+
+    assembler::Register asRegister() const;
+    assembler::XMMRegister asXMMRegister() const;
+    bool isClobberedByCall() const;
+
+    static constexpr Location any() { return Location(AnyReg, 0); }
+    static constexpr Location none() { return Location(None, 0); }
+    static Location forArg(int argnum);
+    static Location forXMMArg(int argnum);
+
+    bool operator==(const Location rhs) const { return this->asInt() == rhs.asInt(); }
+
+    bool operator!=(const Location rhs) const { return !(*this == rhs); }
+
+    bool operator<(const Location& rhs) const { return this->asInt() < rhs.asInt(); }
+
+    uint64_t asInt() const { return (int)type + ((uint64_t)_data << 4); }
+
+    void dump() const;
+};
+static_assert(sizeof(Location) <= 8, "");
+}
+
+namespace std {
+template <> struct hash<pyston::Location> {
+    size_t operator()(const pyston::Location p) const { return p.asInt(); }
+};
 }
 
 #endif

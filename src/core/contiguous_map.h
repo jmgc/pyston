@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,6 +35,12 @@ public:
     typedef typename map_type::iterator iterator;
     typedef typename map_type::const_iterator const_iterator;
     typedef typename std::vector<TVal>::size_type size_type;
+
+    void clear() {
+        map.clear();
+        vec.clear();
+        free_list.clear();
+    }
 
     iterator find(TKey key) { return map.find(key); }
 

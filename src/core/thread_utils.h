@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -182,6 +182,7 @@ private:
     std::tuple<CtorArgs...> ctor_args;
 #ifndef NDEBUG
     int map_elts = 0;
+    bool got_already_destroyed = false;
 #endif
 
     static void dtor(void* val) {
@@ -190,10 +191,12 @@ private:
 
         auto* self = s->self;
 
+        ASSERT(!self->got_already_destroyed, "");
+
         LOCK_REGION(&self->lock);
 
-        ASSERT(self->map.size() == self->map_elts, "%ld %d", self->map.size(), self->map_elts);
         assert(s->my_tid == pthread_self());
+        ASSERT(self->map.size() == self->map_elts, "%ld %d", self->map.size(), self->map_elts);
 
         assert(self->map.count(pthread_self()));
         self->map.erase(pthread_self());
@@ -202,6 +205,8 @@ private:
 #endif
 
         delete s;
+
+        ASSERT(self->map.size() == self->map_elts, "%ld %d", self->map.size(), self->map_elts);
     }
 
     template <int... S> Storage* make(impl::seq<S...>) {
@@ -214,6 +219,7 @@ private:
 
 protected:
     void onFork() override {
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
         pthread_t surviving_ptid = pthread_self();
         for (auto it = this->map.begin(), end = this->map.end(); it != end;) {
             if (it->first != surviving_ptid) {
@@ -225,27 +231,44 @@ protected:
             } else
                 ++it;
         }
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
     }
 
 public:
     PerThreadSet(CtorArgs... ctor_args) : ctor_args(std::forward<CtorArgs>(ctor_args)...) {
         int code = pthread_key_create(&pthread_key, &dtor);
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
+    }
+
+    ~PerThreadSet() {
+        LOCK_REGION(&lock);
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
+        pthread_key_delete(pthread_key);
+#ifndef NDEBUG
+        got_already_destroyed = true;
+#endif
     }
 
     void forEachValue(std::function<void(T*)> f) {
         LOCK_REGION(&lock);
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
 
         for (auto& p : map) {
             f(&p.second->val);
         }
+
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
     }
 
     template <typename... Arguments> void forEachValue(std::function<void(T*, Arguments...)> f, Arguments... args) {
         LOCK_REGION(&lock);
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
 
         for (auto& p : map) {
             f(&p.second->val, std::forward<Arguments>(args)...);
         }
+
+        ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
     }
 
     T* get() {
@@ -265,8 +288,18 @@ public:
             int code = pthread_setspecific(pthread_key, s);
             assert(code == 0);
 
+            assert(map.count(pthread_self()) == 0);
             map[pthread_self()] = s;
+            ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
         }
+
+#ifndef NDEBUG
+        {
+            LOCK_REGION(&lock);
+            ASSERT(this->map.size() == this->map_elts, "%ld %d", this->map.size(), this->map_elts);
+        }
+#endif
+
         return &s->val;
     }
 };

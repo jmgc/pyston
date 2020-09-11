@@ -930,8 +930,9 @@ setup_readline(void)
         strdup(" \t\n`~!@#$%^&*()-=+[{]}\\|;:'\",<>/?");
         /* All nonalphanums except '.' */
 
-    begidx = PyInt_FromLong(0L);
-    endidx = PyInt_FromLong(0L);
+    begidx = PyGC_RegisterStaticConstant(PyInt_FromLong(0L));
+    endidx = PyGC_RegisterStaticConstant(PyInt_FromLong(0L));
+    PyGC_RegisterStaticConstantLocation(&completer);
     /* Initialize (allows .inputrc to override)
      *
      * XXX: A bug in the readline-2.2 library causes a memory leak
@@ -1063,8 +1064,10 @@ readline_until_enter_or_signal(char *prompt, int *signal)
 #endif /*defined(HAVE_RL_CALLBACK) && defined(HAVE_SELECT) */
 
 
+// Pyston changes: change the type of 3rd argument from char* to const char*
+// To match the type of Pyston PyOS_ReadlineFunctionPointer.
 static char *
-call_readline(FILE *sys_stdin, FILE *sys_stdout, char *prompt)
+call_readline(FILE *sys_stdin, FILE *sys_stdout, const char *prompt)
 {
     size_t n;
     char *p, *q;
@@ -1085,7 +1088,7 @@ call_readline(FILE *sys_stdin, FILE *sys_stdout, char *prompt)
 #endif
     }
 
-    p = readline_until_enter_or_signal(prompt, &signal);
+    p = readline_until_enter_or_signal((char*)prompt, &signal);
 
     /* we got an interrupt signal */
     if (signal) {
@@ -1167,6 +1170,6 @@ initreadline(void)
     if (m == NULL)
         return;
 
-    PyOS_ReadlineFunctionPointer = call_readline;
+    PyOS_ReadlineFunctionPointer = &call_readline;
     setup_readline();
 }

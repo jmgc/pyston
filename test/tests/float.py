@@ -3,6 +3,7 @@ f = 1.0
 print f
 
 print float(2)
+print float(x=2)
 
 # print f - 2
 
@@ -37,11 +38,14 @@ print type(F2(D(F())))
 
 print type(float(F()))
 
-try:
-    f = float("hello world")
-    print f
-except ValueError as e:
-    print e
+for a in ["hello world", None]:
+    try:
+        f = float(a)
+        print f
+    except ValueError as e:
+        print "ValueError", e
+    except TypeError as e:
+        print "TypeError", e
 
 try:
     f = float("5 hello world")
@@ -65,6 +69,7 @@ print (0.5).as_integer_ratio()
 print (0.5).is_integer()
 print (1.0).is_integer()
 print 1.0.__hash__(), 1.1.__hash__(), -1.1.__hash__()
+print (0.5).conjugate(), (0.6).imag
 
 print 1.0 ** (10 ** 100)
 print (-1.0) ** (10 ** 100)
@@ -105,3 +110,67 @@ for lhs in all_args:
                 print pow(lhs, rhs, mod)
             except Exception as e:
                 print type(e), e
+
+import sys
+print sys.float_info
+
+if 1:
+    x = -2.0
+
+print(float.__long__(sys.float_info.max))
+print(float.__int__(sys.float_info.max))
+
+data = ["-1.0", "0.0", "1.0",
+        "5.0", "-5.0",
+        "5", "5L", "0L", "5+5j",
+        "\"5\"", "None",
+        ]
+
+operations = ["__rpow__",
+              "__ridv__",
+              "__divmod__", "__rdivmod__",
+              "__rtruediv__",
+              "__coerce__"
+              ]
+
+for x in data:
+    for y in data:
+        for operation in operations:
+            try:
+                print(eval("float.{op}({arg1}, {arg2})".format(op=operation,
+                                                               arg1=x,
+                                                               arg2=y)))
+            except Exception as e:
+                print(e.message)
+
+
+class Foo1(float):
+    def __rdiv__(self, other):
+        print("float custom operation called")
+        return self / other
+
+
+class Foo2(long):
+    def __rdiv__(self, other):
+        print("long custom operation called")
+        return self / other
+
+
+class Foo3(int):
+    def __rdiv__(self, other):
+        print("int custom operation called")
+        return self / other
+
+a = Foo1(1.5)
+b = Foo2(1L)
+c = Foo3(1)
+
+print(1.5 / a)
+print(1.5 / b)
+print(1.5 / c)
+print(1 / a)
+print(1 / b)
+print(1 / c)
+print(1L / a)
+print(1L / b)
+print(1L / c)

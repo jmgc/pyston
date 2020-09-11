@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include "llvm/IR/CallingConv.h"
 
+#include "asm_writing/types.h"
 #include "codegen/stackmaps.h"
 #include "core/common.h"
 
@@ -29,76 +30,21 @@ struct CompiledFunction;
 class CompilerType;
 struct StackMap;
 class TypeRecorder;
-class ICSetupInfo;
+
+static const int DECREF_PP_ID = 1000000;
+extern const int DECREF_PP_SIZE;
+static const int XDECREF_PP_ID = 1000001;
+extern const int XDECREF_PP_SIZE;
 
 static const int MAX_FRAME_SPILLS = 9; // TODO this shouldn't have to be larger than the set of non-callee-save args (9)
                                        // except that will we currently spill the same reg multiple times
-static const int CALL_ONLY_SIZE
+static const int CALL_ONLY_SIZE = 13 + 1; // 13 for the call, + 1 if we want to nop/trap
+
+static const int DEOPT_CALL_ONLY_SIZE
     = 13 + (MAX_FRAME_SPILLS * 9)
       + 1; // 13 for the call, 9 bytes per spill (7 for GP, 9 for XMM), + 1 if we want to nop/trap
 
 void processStackmap(CompiledFunction* cf, StackMap* stackmap);
-
-struct PatchpointInfo {
-public:
-    struct FrameVarInfo {
-        std::string name;
-        CompilerType* type;
-    };
-
-private:
-    CompiledFunction* const parent_cf;
-    const ICSetupInfo* icinfo;
-    int num_ic_stackmap_args;
-    int num_frame_stackmap_args;
-
-    std::vector<FrameVarInfo> frame_vars;
-    unsigned int id;
-
-    PatchpointInfo(CompiledFunction* parent_cf, const ICSetupInfo* icinfo, int num_ic_stackmap_args)
-        : parent_cf(parent_cf),
-          icinfo(icinfo),
-          num_ic_stackmap_args(num_ic_stackmap_args),
-          num_frame_stackmap_args(-1),
-          id(0) {}
-
-
-public:
-    const ICSetupInfo* getICInfo() { return icinfo; }
-
-    int patchpointSize();
-    CompiledFunction* parentFunction() { return parent_cf; }
-
-    const std::vector<FrameVarInfo>& getFrameVars() { return frame_vars; }
-
-    int scratchStackmapArg() { return 0; }
-    int scratchSize() { return 80 + MAX_FRAME_SPILLS * sizeof(void*); }
-
-    void addFrameVar(const std::string& name, CompilerType* type);
-    void setNumFrameArgs(int num_frame_args) {
-        assert(num_frame_stackmap_args == -1);
-        num_frame_stackmap_args = num_frame_args;
-    }
-
-    int icStackmapArgsStart() { return 1; }
-    int numICStackmapArgs() { return num_ic_stackmap_args; }
-
-    int frameStackmapArgsStart() { return icStackmapArgsStart() + numICStackmapArgs(); }
-    int numFrameStackmapArgs() {
-        assert(num_frame_stackmap_args >= 0);
-        return num_frame_stackmap_args;
-    }
-
-    unsigned int getId() const { return id; }
-
-    void parseLocationMap(StackMap::Record* r, LocationMap* map);
-
-    int totalStackmapArgs() { return frameStackmapArgsStart() + numFrameStackmapArgs(); }
-
-    static PatchpointInfo* create(CompiledFunction* parent_cf, const ICSetupInfo* icinfo, int num_ic_stackmap_args,
-                                  void* func_addr);
-    static void* getSlowpathAddr(unsigned int pp_id);
-};
 
 class ICSetupInfo {
 public:
@@ -115,25 +61,22 @@ public:
         Binexp,
         Nonzero,
         Hasnext,
+        Deopt,
     };
 
 private:
-    ICSetupInfo(ICType type, int num_slots, int slot_size, bool has_return_value, TypeRecorder* type_recorder)
-        : type(type),
-          num_slots(num_slots),
-          slot_size(slot_size),
-          has_return_value(has_return_value),
-          type_recorder(type_recorder) {}
+    ICSetupInfo(ICType type, int size, bool has_return_value, assembler::RegisterSet allocatable_regs)
+        : type(type), size(size), has_return_value(has_return_value), allocatable_regs(allocatable_regs) {}
 
 public:
     const ICType type;
-
-    const int num_slots, slot_size;
+    const int size;
     const bool has_return_value;
-    TypeRecorder* const type_recorder;
+    assembler::RegisterSet allocatable_regs;
 
     int totalSize() const;
     bool hasReturnValue() const { return has_return_value; }
+    bool isDeopt() const { return type == Deopt; }
 
     llvm::CallingConv::ID getCallingConvention() const {
 // FIXME: we currently have some issues with using PreserveAll (the rewriter currently
@@ -148,22 +91,100 @@ public:
         return llvm::CallingConv::C;
     }
 
-    static ICSetupInfo* initialize(bool has_return_value, int num_slots, int slot_size, ICType type,
-                                   TypeRecorder* type_recorder);
+    static std::unique_ptr<ICSetupInfo> initialize(bool has_return_value, int size, ICType type,
+                                                   assembler::RegisterSet allocatable_regs
+                                                   = assembler::RegisterSet::stdAllocatable());
 };
 
-ICSetupInfo* createGenericIC(TypeRecorder* type_recorder, bool has_return_value, int size);
-ICSetupInfo* createCallsiteIC(TypeRecorder* type_recorder, int num_args);
-ICSetupInfo* createGetGlobalIC(TypeRecorder* type_recorder);
-ICSetupInfo* createGetattrIC(TypeRecorder* type_recorder);
-ICSetupInfo* createSetattrIC(TypeRecorder* type_recorder);
-ICSetupInfo* createDelattrIC(TypeRecorder* type_recorder);
-ICSetupInfo* createGetitemIC(TypeRecorder* type_recorder);
-ICSetupInfo* createSetitemIC(TypeRecorder* type_recorder);
-ICSetupInfo* createDelitemIC(TypeRecorder* type_recorder);
-ICSetupInfo* createBinexpIC(TypeRecorder* type_recorder);
-ICSetupInfo* createNonzeroIC(TypeRecorder* type_recorder);
-ICSetupInfo* createHasnextIC(TypeRecorder* type_recorder);
+struct PatchpointInfo {
+public:
+    struct FrameVarInfo {
+        int vreg;
+        CompilerType* type;
+    };
+    struct FrameInfoDesc {
+        std::vector<FrameVarInfo> vars;
+        llvm::SmallVector<int, 2> potentially_undefined;
+    };
+
+private:
+    CompiledFunction* const parent_cf;
+    std::unique_ptr<const ICSetupInfo> icinfo;
+    int num_ic_stackmap_args;
+    int num_frame_stackmap_args;
+    bool is_frame_info_stackmap;
+    unsigned int id;
+
+    FrameInfoDesc frame_info_desc;
+
+    PatchpointInfo(CompiledFunction* parent_cf, std::unique_ptr<const ICSetupInfo> icinfo, int num_ic_stackmap_args)
+        : parent_cf(parent_cf),
+          icinfo(std::move(icinfo)),
+          num_ic_stackmap_args(num_ic_stackmap_args),
+          num_frame_stackmap_args(-1),
+          is_frame_info_stackmap(false),
+          id(0) {}
+
+
+public:
+    const ICSetupInfo* getICInfo() { return icinfo.get(); }
+
+    int patchpointSize();
+    CompiledFunction* parentFunction() { return parent_cf; }
+
+    FrameInfoDesc& getFrameDesc() { return frame_info_desc; }
+
+    int scratchStackmapArg() { return 0; }
+    int scratchSize() { return isDeopt() ? MAX_FRAME_SPILLS * sizeof(void*) : 96; }
+    bool isDeopt() const { return icinfo ? icinfo->isDeopt() : false; }
+    bool isFrameInfoStackmap() const { return is_frame_info_stackmap; }
+    int numFrameSpillsSupported() const { return isDeopt() ? MAX_FRAME_SPILLS : 0; }
+
+    void addFrameVar(int vreg, CompilerType* type) {
+        frame_info_desc.vars.push_back(FrameVarInfo({.vreg = vreg, .type = type }));
+    }
+    void addPotentiallyUndefined(int vreg) { frame_info_desc.potentially_undefined.push_back(vreg); }
+
+    void setNumFrameArgs(int num_frame_args) {
+        assert(num_frame_stackmap_args == -1);
+        num_frame_stackmap_args = num_frame_args;
+    }
+    void setIsFrameInfoStackmap(bool b = true) { is_frame_info_stackmap = b; }
+
+    int icStackmapArgsStart() { return isFrameInfoStackmap() ? 0 : 1; }
+    int numICStackmapArgs() { return num_ic_stackmap_args; }
+
+    int frameStackmapArgsStart() { return icStackmapArgsStart() + numICStackmapArgs(); }
+    int numFrameStackmapArgs() {
+        assert(num_frame_stackmap_args >= 0);
+        return num_frame_stackmap_args;
+    }
+
+    unsigned int getId() const { return id; }
+
+    void parseLocationMap(StackMap::Record* r, LocationMap* map);
+
+    int totalStackmapArgs() { return frameStackmapArgsStart() + numFrameStackmapArgs(); }
+
+    static PatchpointInfo* create(CompiledFunction* parent_cf, std::unique_ptr<const ICSetupInfo> icinfo,
+                                  int num_ic_stackmap_args, void* func_addr);
+    static void* getSlowpathAddr(unsigned int pp_id);
+};
+
+class ICInfo;
+std::unique_ptr<ICSetupInfo> createGenericIC(bool has_return_value, int size);
+std::unique_ptr<ICSetupInfo> createCallsiteIC(int num_args, ICInfo* bjit_ic_info);
+std::unique_ptr<ICSetupInfo> createGetGlobalIC();
+std::unique_ptr<ICSetupInfo> createGetattrIC(ICInfo* bjit_ic_info);
+std::unique_ptr<ICSetupInfo> createSetattrIC(ICInfo* bjit_ic_info);
+std::unique_ptr<ICSetupInfo> createDelattrIC();
+std::unique_ptr<ICSetupInfo> createGetitemIC(ICInfo* bjit_ic_info);
+std::unique_ptr<ICSetupInfo> createSetitemIC();
+std::unique_ptr<ICSetupInfo> createDelitemIC();
+std::unique_ptr<ICSetupInfo> createBinexpIC(ICInfo* bjit_ic_info);
+std::unique_ptr<ICSetupInfo> createNonzeroIC();
+std::unique_ptr<ICSetupInfo> createHasnextIC();
+std::unique_ptr<ICSetupInfo> createDeoptIC();
 
 } // namespace pyston
 

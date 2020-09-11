@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,14 +15,18 @@
 #ifndef PYSTON_CODEGEN_PARSER_H
 #define PYSTON_CODEGEN_PARSER_H
 
+#include "core/ast.h"
+#include "core/types.h"
+
 namespace pyston {
 
 class AST_Module;
+class ASTAllocator;
 
-AST_Module* parse_string(const char* code);
-
-AST_Module* parse_file(const char* fn);
-AST_Module* caching_parse_file(const char* fn);
+std::pair<AST_Module*, std::unique_ptr<ASTAllocator>> parse_string(const char* code, FutureFlags inherited_flags);
+std::pair<AST_Module*, std::unique_ptr<ASTAllocator>> parse_file(const char* fn, FutureFlags inherited_flags);
+std::pair<AST_Module*, std::unique_ptr<ASTAllocator>> caching_parse_file(const char* fn, FutureFlags inherited_flags,
+                                                                         bool force_reparse = false);
 }
 
 #endif

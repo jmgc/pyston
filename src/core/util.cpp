@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -95,18 +95,6 @@ Timer::~Timer() {
 }
 
 #endif // !DISABLE_TIMERS
-
-bool startswith(const std::string& s, const std::string& pattern) {
-    if (pattern.size() > s.size())
-        return false;
-    return s.compare(0, pattern.size(), pattern) == 0;
-}
-
-bool endswith(const std::string& s, const std::string& pattern) {
-    if (pattern.size() > s.size())
-        return false;
-    return s.compare(s.size() - pattern.size(), pattern.size(), pattern) == 0;
-}
 
 void removeDirectoryIfExists(const std::string& path) {
     llvm_error_code code;

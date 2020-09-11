@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,17 +15,19 @@
 #ifndef PYSTON_CODEGEN_IRGEN_FUTURE_H
 #define PYSTON_CODEGEN_IRGEN_FUTURE_H
 
-#include <vector>
+#include "llvm/ADT/ArrayRef.h"
 
 #include "core/types.h"
 
 namespace pyston {
 
+class AST_stmt;
+
 // Loop through import statements to find __future__ imports throwing errors for
 // bad __future__ imports. Returns the futures that are turned on. This is used
 // for irgeneration; the parser still has to handle some futures on its own,
 // when they are relevant for the parser.
-FutureFlags getFutureFlags(std::vector<AST_stmt*> const& body, const char* file);
+FutureFlags getFutureFlags(llvm::ArrayRef<AST_stmt*> body, const char* file);
 }
 
 #endif

@@ -94,7 +94,7 @@ struct _dictobject {
 #endif
 typedef struct {
     PyObject_HEAD;
-    char _filler[SIZEOF_UNORDEREDMAP];
+    char _filler[24];
 } PyDictObject;
 
 // Pyston change: these are no longer static objects:
@@ -103,24 +103,21 @@ PyAPI_DATA(PyTypeObject) PyDict_Type;
 PyAPI_DATA(PyTypeObject) PyDictIterKey_Type;
 PyAPI_DATA(PyTypeObject) PyDictIterValue_Type;
 PyAPI_DATA(PyTypeObject) PyDictIterItem_Type;
+#endif
 PyAPI_DATA(PyTypeObject) PyDictKeys_Type;
 PyAPI_DATA(PyTypeObject) PyDictItems_Type;
 PyAPI_DATA(PyTypeObject) PyDictValues_Type;
-#endif
+
 PyAPI_DATA(PyTypeObject*) dict_cls;
 #define PyDict_Type (*dict_cls)
+PyAPI_DATA(PyTypeObject*) attrwrapper_cls;
+#define PyAttrWrapper_Type (*attrwrapper_cls)
 PyAPI_DATA(PyTypeObject*) dictiterkey_cls;
 #define PyDictIterKey_Type (*dictiterkey_cls)
 PyAPI_DATA(PyTypeObject*) dictitervalue_cls;
 #define PyDictIterValue_Type (*dictitervalue_cls)
 PyAPI_DATA(PyTypeObject*) dictiteritem_cls;
 #define PyDictIterItem_Type (*dictiteritem_cls)
-PyAPI_DATA(PyTypeObject*) dictkeys_cls;
-#define PyDictKeys_Type (*dictkeys_cls)
-PyAPI_DATA(PyTypeObject*) dictitems_cls;
-#define PyDictItems_Type (*dictitems_cls)
-PyAPI_DATA(PyTypeObject*) dictvalues_cls;
-#define PyDictValues_Type (*dictvalues_cls)
 
 #define PyDict_Check(op) \
                  PyType_FastSubclass(Py_TYPE(op), Py_TPFLAGS_DICT_SUBCLASS)
@@ -133,7 +130,7 @@ PyAPI_DATA(PyTypeObject*) dictvalues_cls;
     (PyDictKeys_Check(op) || PyDictItems_Check(op))
 
 PyAPI_FUNC(PyObject *) PyDict_New(void) PYSTON_NOEXCEPT;
-PyAPI_FUNC(PyObject *) PyDict_GetItem(PyObject *mp, PyObject *key) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject *)) PyDict_GetItem(PyObject *mp, PyObject *key) PYSTON_NOEXCEPT;
 PyAPI_FUNC(int) PyDict_SetItem(PyObject *mp, PyObject *key, PyObject *item) PYSTON_NOEXCEPT;
 PyAPI_FUNC(int) PyDict_DelItem(PyObject *mp, PyObject *key) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) PyDict_Clear(PyObject *mp) PYSTON_NOEXCEPT;
@@ -172,7 +169,7 @@ PyAPI_FUNC(int) PyDict_MergeFromSeq2(PyObject *d,
                                            PyObject *seq2,
                                            int override) PYSTON_NOEXCEPT;
 
-PyAPI_FUNC(PyObject *) PyDict_GetItemString(PyObject *dp, const char *key) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject *)) PyDict_GetItemString(PyObject *dp, const char *key) PYSTON_NOEXCEPT;
 PyAPI_FUNC(int) PyDict_SetItemString(PyObject *dp, const char *key, PyObject *item) PYSTON_NOEXCEPT;
 PyAPI_FUNC(int) PyDict_DelItemString(PyObject *dp, const char *key) PYSTON_NOEXCEPT;
 

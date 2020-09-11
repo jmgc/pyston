@@ -1,4 +1,4 @@
-// Copyright (c) 2014 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,12 +25,10 @@ namespace pyston {
 class PystonTestEnvironment : public testing::Environment {
     void SetUp() override {
         threading::registerMainThread();
-
-        threading::acquireGLRead();
     }
 
     void TearDown() override {
-        threading::releaseGLRead();
+        // threading::releaseGLRead();
     }
 };
 

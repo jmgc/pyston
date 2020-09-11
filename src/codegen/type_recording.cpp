@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,22 +14,21 @@
 
 #include "codegen/type_recording.h"
 
-#include <unordered_map>
-
+#include "asm_writing/icinfo.h"
 #include "core/options.h"
 #include "core/types.h"
 
 namespace pyston {
 
-static std::unordered_map<AST*, TypeRecorder*> type_recorders;
-TypeRecorder* getTypeRecorderForNode(AST* node) {
-    TypeRecorder*& r = type_recorders[node];
-    if (r == NULL)
-        r = new TypeRecorder();
-    return r;
-}
-
 Box* recordType(TypeRecorder* self, Box* obj) {
+    // The baseline JIT directly generates machine code for this function inside JitFragmentWriter::_emitRecordType.
+    // When changing this function one has to also change the bjit code.
+
+    if (!obj) {
+        assert(PyErr_Occurred());
+        return obj;
+    }
+
     BoxedClass* cls = obj->cls;
     if (cls != self->last_seen) {
         self->last_seen = cls;
@@ -43,13 +42,12 @@ Box* recordType(TypeRecorder* self, Box* obj) {
     return obj;
 }
 
-BoxedClass* predictClassFor(AST* node) {
-    auto it = type_recorders.find(node);
-    if (it == type_recorders.end())
+BoxedClass* predictClassFor(BST_stmt* node) {
+    ICInfo* ic = ICInfo::getICInfoForNode(node);
+    if (!ic || !ic->getTypeRecorder())
         return NULL;
 
-    TypeRecorder* r = it->second;
-    return r->predict();
+    return ic->getTypeRecorder()->predict();
 }
 
 BoxedClass* TypeRecorder::predict() {

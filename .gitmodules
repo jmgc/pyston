@@ -1,33 +1,41 @@
-[submodule "libunwind"]
-	path = libunwind
-	url = git://git.sv.gnu.org/libunwind.git
-        ignore = all
-[submodule "libpypa"]
-	path = libpypa
-	url = git://github.com/vinzenz/libpypa.git
-[submodule "test/integration/django"]
-	path = test/integration/django
+[submodule "test/lib/django"]
+	path = test/lib/django
 	url = https://github.com/django/django
-[submodule "test/integration/virtualenv"]
-	path = test/integration/virtualenv
+[submodule "test/lib/virtualenv"]
+	path = test/lib/virtualenv
 	url = https://github.com/dropbox/virtualenv
-[submodule "lz4"]
-	path = lz4
-	url = git://github.com/Cyan4973/lz4.git
-[submodule "test/integration/pycrypto"]
-	path = test/integration/pycrypto
+[submodule "test/lib/pycrypto"]
+	path = test/lib/pycrypto
 	url = https://github.com/dlitz/pycrypto.git
-[submodule "test/integration/gflags"]
-	path = test/integration/gflags
+[submodule "test/lib/gflags"]
+	path = test/lib/gflags
 	url = https://github.com/google/python-gflags
 	ignore = untracked
-[submodule "test/integration/sqlalchemy"]
-	path = test/integration/sqlalchemy
+[submodule "test/lib/sqlalchemy"]
+	path = test/lib/sqlalchemy
 	url = https://github.com/zzzeek/sqlalchemy
-[submodule "test/integration/pyxl"]
-	path = test/integration/pyxl
+[submodule "test/lib/pyxl"]
+	path = test/lib/pyxl
 	url = https://github.com/dropbox/pyxl.git
 	ignore = untracked
-[submodule "jemalloc"]
-	path = jemalloc
+[submodule "build_deps/libunwind"]
+	path = build_deps/libunwind
+	url = https://github.com/libunwind/libunwind.git
+	ignore = all
+[submodule "build_deps/lz4"]
+	path = build_deps/lz4
+	url = git://github.com/Cyan4973/lz4.git
+[submodule "build_deps/jemalloc"]
+	path = build_deps/jemalloc
 	url = git://github.com/jemalloc/jemalloc.git
+	ignore = untracked
+[submodule "test/lib/decorator"]
+	path = test/lib/decorator
+	url = https://github.com/micheles/decorator
+[submodule "test/lib/pyinotify"]
+	path = test/lib/pyinotify
+	url = https://github.com/seb-m/pyinotify.git
+[submodule "test/lib/sqlalchemy_0.5"]
+	path = test/lib/sqlalchemy_0.5
+	url = https://github.com/zzzeek/sqlalchemy
+	ignore = untracked

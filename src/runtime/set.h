@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,30 +15,34 @@
 #ifndef PYSTON_RUNTIME_SET_H
 #define PYSTON_RUNTIME_SET_H
 
-#include <unordered_set>
-
+#include "core/from_llvm/DenseSet.h"
 #include "core/types.h"
 #include "runtime/types.h"
 
 namespace pyston {
 
 void setupSet();
-void teardownSet();
 
 extern "C" Box* createSet();
 
 class BoxedSet : public Box {
 public:
-    typedef std::unordered_set<Box*, PyHasher, PyEq, StlCompatAllocator<Box*>> Set;
+    typedef pyston::DenseSet<BoxAndHash, BoxAndHash::Comparisons, /* MinSize= */ 8> Set;
     Set s;
     Box** weakreflist; /* List of weak references */
 
-    BoxedSet() __attribute__((visibility("default"))) {}
+    BoxedSet() __attribute__((visibility("default"))) : weakreflist(NULL) {}
 
     template <typename T> __attribute__((visibility("default"))) BoxedSet(T&& s) : s(std::forward<T>(s)) {}
 
-    DEFAULT_CLASS(set_cls);
+    DEFAULT_CLASS_SIMPLE(set_cls, true);
+
+    static void dealloc(Box* b) noexcept;
+    static int traverse(Box* self, visitproc visit, void* arg) noexcept;
+    static int clear(Box* self) noexcept;
 };
+
+void _setAddStolen(BoxedSet* self, STOLEN(Box*) val);
 }
 
 #endif

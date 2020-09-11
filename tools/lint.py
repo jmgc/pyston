@@ -25,6 +25,7 @@ def verify_include_guard(_, dir, files):
         with open(fn) as f:
             while True:
                 l = f.readline()
+                assert l, "Did not find include guard in " + fn
                 if l.startswith('//') or not l.strip():
                     continue
                 break
@@ -42,7 +43,7 @@ def verify_license(_, dir, files):
             elif fn.endswith("/astprint.cpp"):
                 continue
             else:
-                assert "Copyright (c) 2014-2015 Dropbox, Inc." in s, fn
+                assert "Copyright (c) 2014-2016 Dropbox, Inc." in s, fn
                 assert "Apache License, Version 2.0" in s, fn
 
 PYSTON_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../src"))
@@ -76,6 +77,12 @@ def verify_include_order(_, dir, files):
 
                 m = include_re.match(l)
                 if m:
+                    # Python-ast.h is a tricky include file since it 1) doesn't have include guards, and 2)
+                    # it doesn't include its dependencies.  Let it (and cpython_ast.h which includes it)
+                    # avoid the lint rules.
+                    if m.group(1) == '"Python-ast.h"' or m.group(1) == '"cpython_ast.h"':
+                        continue
+
                     if section is None:
                         section = []
                     section.append(m.group(1))

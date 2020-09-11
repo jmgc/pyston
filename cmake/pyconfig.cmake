@@ -2,6 +2,7 @@
 
 include(CheckIncludeFiles)
 include(CheckTypeSizeof)
+include(CheckSymbolExists)
 
 set(CMAKE_EXTRA_INCLUDE_FILES unordered_map)
 set(CMAKE_REQUIRED_FLAGS -std=c++11)
@@ -58,4 +59,13 @@ check_include_files(unistd.h HAVE_UNISTD_H)
 check_include_files(utime.h HAVE_UTIME_H)
 check_include_files(wchar.h HAVE_WCHAR_H)
 
-configure_file(from_cpython/Include/pyconfig.h.in from_cpython/Include/pyconfig.h)
+set(CMAKE_REQUIRED_LIBRARIES util)
+
+check_symbol_exists(openpty "pty.h" HAVE_OPENPTY)
+
+configure_file(from_cpython/Include/pyconfig.h.in include/python2.7/pyconfig.h)
+
+# CMake sucks: it has no idea that pyconfig.h is something that can be installed.
+# Just tell it to install whatever file is at that particular location, and rely on
+# the rest of the build rules to ensure that it's made in time.
+install(FILES ${CMAKE_BINARY_DIR}/include/python2.7/pyconfig.h DESTINATION include/python2.7)

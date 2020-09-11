@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "capi/typeobject.h"
 #include "codegen/compvars.h"
 #include "runtime/objmodel.h"
 #include "runtime/rewrite_args.h"
@@ -19,43 +20,25 @@
 
 namespace pyston {
 
-extern "C" {
-BoxedClass* wrapperdescr_cls, *wrapperobject_cls;
-}
-
-static Box* memberGet(BoxedMemberDescriptor* self, Box* inst, Box* owner) {
-    RELEASE_ASSERT(self->cls == member_descriptor_cls, "");
-
-    if (inst == None)
-        return self;
-
-    if (self->type == BoxedMemberDescriptor::OBJECT) {
-        Box* rtn = *(Box**)(((char*)inst) + self->offset);
-        if (!rtn)
-            rtn = None;
-        return rtn;
-    }
-
-    Py_FatalError("unimplemented");
-}
-
 static void propertyDocCopy(BoxedProperty* prop, Box* fget) {
     assert(prop);
     assert(fget);
     Box* get_doc;
 
-    static BoxedString* doc_str = internStringImmortal("__doc__");
+    static BoxedString* doc_str = getStaticString("__doc__");
     try {
-        get_doc = getattrInternal<ExceptionStyle::CXX>(fget, doc_str, NULL);
+        get_doc = getattrInternal<ExceptionStyle::CXX>(fget, doc_str);
     } catch (ExcInfo e) {
         if (!e.matches(Exception)) {
             throw e;
         }
+        e.clear();
         get_doc = NULL;
     }
 
     if (get_doc) {
         if (prop->cls == property_cls) {
+            Py_XDECREF(prop->prop_doc);
             prop->prop_doc = get_doc;
         } else {
             /* If this is a property subclass, put __doc__
@@ -74,26 +57,34 @@ static Box* propertyInit(Box* _self, Box* fget, Box* fset, Box** args) {
     Box* doc = args[1];
 
     BoxedProperty* self = static_cast<BoxedProperty*>(_self);
-    self->prop_get = fget;
-    self->prop_set = fset;
-    self->prop_del = fdel;
-    self->prop_doc = doc;
+    Box* prev_get = self->prop_get;
+    Box* prev_set = self->prop_set;
+    Box* prev_del = self->prop_del;
+    Box* prev_doc = self->prop_doc;
+    self->prop_get = fget == Py_None ? NULL : incref(fget);
+    self->prop_set = fset == Py_None ? NULL : incref(fset);
+    self->prop_del = fdel == Py_None ? NULL : incref(fdel);
+    self->prop_doc = xincref(doc);
     self->getter_doc = false;
+    Py_XDECREF(prev_get);
+    Py_XDECREF(prev_set);
+    Py_XDECREF(prev_del);
+    Py_XDECREF(prev_doc);
 
     /* if no docstring given and the getter has one, use that one */
-    if ((doc == NULL || doc == None) && fget != NULL) {
+    if ((doc == NULL || doc == Py_None) && fget != NULL) {
         propertyDocCopy(self, fget);
     }
 
-    return None;
+    return incref(Py_None);
 }
 
 static Box* propertyGet(Box* self, Box* obj, Box* type) {
     RELEASE_ASSERT(isSubclass(self->cls, property_cls), "");
 
     BoxedProperty* prop = static_cast<BoxedProperty*>(self);
-    if (obj == NULL || obj == None) {
-        return self;
+    if (obj == NULL || obj == Py_None) {
+        return incref(self);
     }
 
     if (prop->prop_get == NULL) {
@@ -119,11 +110,11 @@ static Box* propertySet(Box* self, Box* obj, Box* val) {
     }
 
     if (val == NULL) {
-        runtimeCall(func, ArgPassSpec(1), obj, NULL, NULL, NULL, NULL);
+        autoDecref(runtimeCall(func, ArgPassSpec(1), obj, NULL, NULL, NULL, NULL));
     } else {
-        runtimeCall(func, ArgPassSpec(2), obj, val, NULL, NULL, NULL);
+        autoDecref(runtimeCall(func, ArgPassSpec(2), obj, val, NULL, NULL, NULL));
     }
-    return None;
+    return incref(Py_None);
 }
 
 static Box* propertyDel(Box* self, Box* obj) {
@@ -133,11 +124,11 @@ static Box* propertyDel(Box* self, Box* obj) {
 static Box* property_copy(BoxedProperty* old, Box* get, Box* set, Box* del) {
     RELEASE_ASSERT(isSubclass(old->cls, property_cls), "");
 
-    if (!get || get == None)
+    if (!get || get == Py_None)
         get = old->prop_get;
-    if (!set || set == None)
+    if (!set || set == Py_None)
         set = old->prop_set;
-    if (!del || del == None)
+    if (!del || del == Py_None)
         del = old->prop_del;
 
     // Optimization for the case when the old propery is not subclassed
@@ -145,14 +136,20 @@ static Box* property_copy(BoxedProperty* old, Box* get, Box* set, Box* del) {
         BoxedProperty* prop = new BoxedProperty(get, set, del, old->prop_doc);
 
         prop->getter_doc = false;
-        if ((old->getter_doc && get != None) || !old->prop_doc)
+        if ((old->getter_doc && get != Py_None) || !old->prop_doc)
             propertyDocCopy(prop, get);
 
         return prop;
     } else {
+        if (!get)
+            get = Py_None;
+        if (!set)
+            set = Py_None;
+        if (!del)
+            del = Py_None;
         Box* doc;
-        if ((old->getter_doc && get != None) || !old->prop_doc)
-            doc = None;
+        if ((old->getter_doc && get != Py_None) || !old->prop_doc)
+            doc = Py_None;
         else
             doc = old->prop_doc;
 
@@ -179,15 +176,16 @@ static Box* propertyDeleter(Box* self, Box* obj) {
 }
 
 static Box* staticmethodInit(Box* _self, Box* f) {
-    RELEASE_ASSERT(_self->cls == staticmethod_cls, "");
+    RELEASE_ASSERT(isSubclass(_self->cls, staticmethod_cls), "");
     BoxedStaticmethod* self = static_cast<BoxedStaticmethod*>(_self);
-    self->sm_callable = f;
+    Py_CLEAR(self->sm_callable);
+    self->sm_callable = incref(f);
 
-    return None;
+    return incref(Py_None);
 }
 
 static Box* staticmethodGet(Box* self, Box* obj, Box* type) {
-    RELEASE_ASSERT(self->cls == staticmethod_cls, "");
+    RELEASE_ASSERT(isSubclass(self->cls, staticmethod_cls), "");
 
     BoxedStaticmethod* sm = static_cast<BoxedStaticmethod*>(self);
 
@@ -195,7 +193,7 @@ static Box* staticmethodGet(Box* self, Box* obj, Box* type) {
         raiseExcHelper(RuntimeError, "uninitialized staticmethod object");
     }
 
-    return sm->sm_callable;
+    return incref(sm->sm_callable);
 }
 
 extern "C" PyObject* PyClassMethod_New(PyObject* callable) noexcept {
@@ -203,15 +201,17 @@ extern "C" PyObject* PyClassMethod_New(PyObject* callable) noexcept {
 }
 
 static Box* classmethodInit(Box* _self, Box* f) {
-    RELEASE_ASSERT(_self->cls == classmethod_cls, "");
+    RELEASE_ASSERT(isSubclass(_self->cls, classmethod_cls), "");
     BoxedClassmethod* self = static_cast<BoxedClassmethod*>(_self);
-    self->cm_callable = f;
+    Box* prev = self->cm_callable;
+    self->cm_callable = incref(f);
+    Py_XDECREF(prev);
 
-    return None;
+    return incref(Py_None);
 }
 
 static Box* classmethodGet(Box* self, Box* obj, Box* type) {
-    RELEASE_ASSERT(self->cls == classmethod_cls, "");
+    RELEASE_ASSERT(isSubclass(self->cls, classmethod_cls), "");
 
     BoxedClassmethod* cm = static_cast<BoxedClassmethod*>(self);
 
@@ -226,24 +226,30 @@ static Box* classmethodGet(Box* self, Box* obj, Box* type) {
     return new BoxedInstanceMethod(type, cm->cm_callable, type);
 }
 
-// TODO this should be auto-generated as a slot wrapper:
-Box* BoxedMethodDescriptor::__call__(BoxedMethodDescriptor* self, Box* obj, BoxedTuple* varargs, Box** _args) {
-    BoxedDict* kwargs = static_cast<BoxedDict*>(_args[0]);
-    return BoxedMethodDescriptor::tppCall(self, NULL, ArgPassSpec(1, 0, true, true), obj, varargs, kwargs, NULL, NULL);
-}
+template <ExceptionStyle S>
+Box* methodDescrTppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1, Box* arg2, Box* arg3,
+                        Box** args, const std::vector<BoxedString*>* keyword_names) noexcept(S == CAPI) {
+    if (S == CAPI) {
+        try {
+            return methodDescrTppCall<CXX>(_self, NULL, argspec, arg1, arg2, arg3, args, keyword_names);
+        } catch (ExcInfo e) {
+            setCAPIException(e);
+            return NULL;
+        }
+    }
 
-Box* BoxedMethodDescriptor::tppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1,
-                                    Box* arg2, Box* arg3, Box** args, const std::vector<BoxedString*>* keyword_names) {
     STAT_TIMER(t0, "us_timer_boxedmethoddescriptor__call__", 10);
 
-    assert(_self->cls == method_cls);
-    BoxedMethodDescriptor* self = static_cast<BoxedMethodDescriptor*>(_self);
+    assert(_self->cls == &PyMethodDescr_Type || _self->cls == &PyClassMethodDescr_Type);
+    PyMethodDescrObject* self = reinterpret_cast<PyMethodDescrObject*>(_self);
 
-    int ml_flags = self->method->ml_flags;
-    int call_flags = ml_flags & (~METH_CLASS);
+    bool is_classmethod = (_self->cls == &PyClassMethodDescr_Type);
+
+    int ml_flags = self->d_method->ml_flags;
+    int call_flags = ml_flags & ~(METH_CLASS | METH_COEXIST | METH_STATIC);
 
     if (rewrite_args && !rewrite_args->func_guarded) {
-        rewrite_args->obj->addAttrGuard(offsetof(BoxedMethodDescriptor, method), (intptr_t)self->method);
+        rewrite_args->obj->addAttrGuard(offsetof(PyMethodDescrObject, d_method), (intptr_t)self->d_method);
     }
 
     ParamReceiveSpec paramspec(0, 0, false, false);
@@ -279,375 +285,379 @@ Box* BoxedMethodDescriptor::tppCall(Box* _self, CallRewriteArgs* rewrite_args, A
         RELEASE_ASSERT(0, "0x%x", call_flags);
     }
 
-    Box* oarg1 = NULL;
-    Box* oarg2 = NULL;
-    Box* oarg3 = NULL;
-    Box** oargs = NULL;
-
-    Box* oargs_array[1];
-    if (paramspec.totalReceived() >= 3) {
-        assert((paramspec.totalReceived() - 3) <= sizeof(oargs_array) / sizeof(oargs_array[0]));
-        oargs = oargs_array;
+    bool arg1_class_guarded = false;
+    if (rewrite_args && argspec.num_args >= 1) {
+        // Try to do the guard before rearrangeArguments if possible:
+        rewrite_args->arg1->addAttrGuard(offsetof(Box, cls), (intptr_t)arg1->cls);
+        arg1_class_guarded = true;
     }
 
-    bool rewrite_success = false;
-    rearrangeArguments(paramspec, NULL, self->method->ml_name, defaults, rewrite_args, rewrite_success, argspec, arg1,
-                       arg2, arg3, args, keyword_names, oarg1, oarg2, oarg3, oargs);
+    auto continuation = [=](CallRewriteArgs* rewrite_args, Box* arg1, Box* arg2, Box* arg3, Box** args) {
+        if (is_classmethod) {
+            rewrite_args = NULL;
+            if (!PyType_Check(arg1))
+                raiseExcHelper(TypeError, "descriptor '%s' requires a type but received a '%s'",
+                               self->d_method->ml_name, getFullTypeName(arg1).c_str());
+        } else {
+            if (!isSubclass(arg1->cls, self->d_type))
+                raiseExcHelper(TypeError, "descriptor '%s' requires a '%s' arg1 but received a '%s'",
+                               self->d_method->ml_name, self->d_type->tp_name, getFullTypeName(arg1).c_str());
+        }
 
-    if (!rewrite_success)
-        rewrite_args = NULL;
+        if (rewrite_args && !arg1_class_guarded) {
+            rewrite_args->arg1->addAttrGuard(offsetof(Box, cls), (intptr_t)arg1->cls);
+        }
 
-    if (ml_flags & METH_CLASS) {
-        rewrite_args = NULL;
-        if (!isSubclass(oarg1->cls, type_cls))
-            raiseExcHelper(TypeError, "descriptor '%s' requires a type but received a '%s'", self->method->ml_name,
-                           getFullTypeName(oarg1).c_str());
-    } else {
-        if (!isSubclass(oarg1->cls, self->type))
-            raiseExcHelper(TypeError, "descriptor '%s' requires a '%s' oarg1 but received a '%s'",
-                           self->method->ml_name, getFullNameOfClass(self->type).c_str(),
-                           getFullTypeName(oarg1).c_str());
-    }
-
-    if (rewrite_args) {
-        rewrite_args->arg1->addAttrGuard(offsetof(Box, cls), (intptr_t)oarg1->cls);
-    }
-
-    Box* rtn;
-    if (call_flags == METH_NOARGS) {
-        {
-            UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
-            rtn = (Box*)self->method->ml_meth(oarg1, NULL);
-        }
-        if (rewrite_args)
-            rewrite_args->out_rtn
-                = rewrite_args->rewriter->call(true, (void*)self->method->ml_meth, rewrite_args->arg1,
-                                               rewrite_args->rewriter->loadConst(0, Location::forArg(1)));
-    } else if (call_flags == METH_VARARGS) {
-        {
-            UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
-            rtn = (Box*)self->method->ml_meth(oarg1, oarg2);
-        }
-        if (rewrite_args)
-            rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)self->method->ml_meth, rewrite_args->arg1,
-                                                                 rewrite_args->arg2);
-    } else if (call_flags == (METH_VARARGS | METH_KEYWORDS)) {
-        {
-            UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
-            rtn = (Box*)((PyCFunctionWithKeywords)self->method->ml_meth)(oarg1, oarg2, oarg3);
-        }
-        if (rewrite_args)
-            rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)self->method->ml_meth, rewrite_args->arg1,
-                                                                 rewrite_args->arg2, rewrite_args->arg3);
-    } else if (call_flags == METH_O) {
-        {
-            UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
-            rtn = (Box*)self->method->ml_meth(oarg1, oarg2);
-        }
-        if (rewrite_args)
-            rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)self->method->ml_meth, rewrite_args->arg1,
-                                                                 rewrite_args->arg2);
-    } else if ((call_flags & ~(METH_O3 | METH_D3)) == 0) {
-        {
-            UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
-            rtn = ((Box * (*)(Box*, Box*, Box*, Box**))self->method->ml_meth)(oarg1, oarg2, oarg3, oargs);
-        }
-        if (rewrite_args) {
-            if (paramspec.totalReceived() == 2)
-                rewrite_args->out_rtn = rewrite_args->rewriter->call(true, (void*)self->method->ml_meth,
-                                                                     rewrite_args->arg1, rewrite_args->arg2);
-            else if (paramspec.totalReceived() == 3)
-                rewrite_args->out_rtn = rewrite_args->rewriter->call(
-                    true, (void*)self->method->ml_meth, rewrite_args->arg1, rewrite_args->arg2, rewrite_args->arg3);
-            else if (paramspec.totalReceived() > 3)
+        Box* rtn;
+        if (call_flags == METH_NOARGS) {
+            {
+                UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
+                rtn = (Box*)self->d_method->ml_meth(arg1, NULL);
+            }
+            if (rewrite_args)
                 rewrite_args->out_rtn
-                    = rewrite_args->rewriter->call(true, (void*)self->method->ml_meth, rewrite_args->arg1,
-                                                   rewrite_args->arg2, rewrite_args->arg3, rewrite_args->args);
-            else
-                abort();
+                    = rewrite_args->rewriter->call(true, (void*)self->d_method->ml_meth, rewrite_args->arg1,
+                                                   rewrite_args->rewriter->loadConst(0, Location::forArg(1)))
+                          ->setType(RefType::OWNED);
+        } else if (call_flags == METH_VARARGS) {
+            {
+                UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
+                rtn = (Box*)self->d_method->ml_meth(arg1, arg2);
+            }
+            if (rewrite_args)
+                rewrite_args->out_rtn
+                    = rewrite_args->rewriter->call(true, (void*)self->d_method->ml_meth, rewrite_args->arg1,
+                                                   rewrite_args->arg2)->setType(RefType::OWNED);
+        } else if (call_flags == (METH_VARARGS | METH_KEYWORDS)) {
+            {
+                UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
+                rtn = (Box*)((PyCFunctionWithKeywords)self->d_method->ml_meth)(arg1, arg2, arg3);
+            }
+            if (rewrite_args)
+                rewrite_args->out_rtn
+                    = rewrite_args->rewriter->call(true, (void*)self->d_method->ml_meth, rewrite_args->arg1,
+                                                   rewrite_args->arg2, rewrite_args->arg3)->setType(RefType::OWNED);
+        } else if (call_flags == METH_O) {
+            {
+                UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
+                rtn = (Box*)self->d_method->ml_meth(arg1, arg2);
+            }
+            if (rewrite_args)
+                rewrite_args->out_rtn
+                    = rewrite_args->rewriter->call(true, (void*)self->d_method->ml_meth, rewrite_args->arg1,
+                                                   rewrite_args->arg2)->setType(RefType::OWNED);
+        } else if ((call_flags & ~(METH_O3 | METH_D3)) == 0) {
+            {
+                UNAVOIDABLE_STAT_TIMER(t0, "us_timer_in_builtins");
+                rtn = ((Box * (*)(Box*, Box*, Box*, Box**))self->d_method->ml_meth)(arg1, arg2, arg3, args);
+            }
+            if (rewrite_args) {
+                if (paramspec.totalReceived() == 2)
+                    rewrite_args->out_rtn
+                        = rewrite_args->rewriter->call(true, (void*)self->d_method->ml_meth, rewrite_args->arg1,
+                                                       rewrite_args->arg2)->setType(RefType::OWNED);
+                else if (paramspec.totalReceived() == 3)
+                    rewrite_args->out_rtn
+                        = rewrite_args->rewriter->call(true, (void*)self->d_method->ml_meth, rewrite_args->arg1,
+                                                       rewrite_args->arg2, rewrite_args->arg3)->setType(RefType::OWNED);
+                else if (paramspec.totalReceived() > 3)
+                    rewrite_args->out_rtn
+                        = rewrite_args->rewriter->call(true, (void*)self->d_method->ml_meth, rewrite_args->arg1,
+                                                       rewrite_args->arg2, rewrite_args->arg3,
+                                                       rewrite_args->args)->setType(RefType::OWNED);
+                else
+                    abort();
+            }
+        } else {
+            RELEASE_ASSERT(0, "0x%x", call_flags);
         }
-    } else {
-        RELEASE_ASSERT(0, "0x%x", call_flags);
-    }
 
-    if (!rtn)
-        throwCAPIException();
+        if (!rtn)
+            throwCAPIException();
+
+        if (rewrite_args) {
+            rewrite_args->rewriter->checkAndThrowCAPIException(rewrite_args->out_rtn);
+            rewrite_args->out_success = true;
+        }
+
+        return rtn;
+    };
+
+    return rearrangeArgumentsAndCall(paramspec, NULL, self->d_method->ml_name, defaults, rewrite_args, argspec, arg1,
+                                     arg2, arg3, args, keyword_names, continuation);
+}
+
+void BoxedProperty::dealloc(Box* _self) noexcept {
+    BoxedProperty* self = static_cast<BoxedProperty*>(_self);
+
+    PyObject_GC_UnTrack(self);
+    Py_XDECREF(self->prop_get);
+    Py_XDECREF(self->prop_set);
+    Py_XDECREF(self->prop_del);
+    Py_XDECREF(self->prop_doc);
+    self->cls->tp_free(self);
+}
+
+int BoxedProperty::traverse(Box* _self, visitproc visit, void* arg) noexcept {
+    BoxedProperty* self = static_cast<BoxedProperty*>(_self);
+
+    Py_VISIT(self->prop_get);
+    Py_VISIT(self->prop_set);
+    Py_VISIT(self->prop_del);
+    Py_VISIT(self->prop_doc);
+    return 0;
+}
+
+void BoxedStaticmethod::dealloc(Box* _self) noexcept {
+    BoxedStaticmethod* self = static_cast<BoxedStaticmethod*>(_self);
+
+    PyObject_GC_UnTrack(self);
+    Py_XDECREF(self->sm_callable);
+    self->cls->tp_free(self);
+}
+
+int BoxedStaticmethod::traverse(Box* _self, visitproc visit, void* arg) noexcept {
+    BoxedStaticmethod* self = static_cast<BoxedStaticmethod*>(_self);
+
+    Py_VISIT(self->sm_callable);
+    return 0;
+}
+
+int BoxedStaticmethod::clear(Box* _self) noexcept {
+    BoxedStaticmethod* self = static_cast<BoxedStaticmethod*>(_self);
+
+    Py_CLEAR(self->sm_callable);
+    return 0;
+}
+
+void BoxedClassmethod::dealloc(Box* _self) noexcept {
+    BoxedClassmethod* self = static_cast<BoxedClassmethod*>(_self);
+
+    PyObject_GC_UnTrack(self);
+    Py_XDECREF(self->cm_callable);
+    self->cls->tp_free(self);
+}
+
+int BoxedClassmethod::traverse(Box* _self, visitproc visit, void* arg) noexcept {
+    BoxedClassmethod* self = static_cast<BoxedClassmethod*>(_self);
+
+    Py_VISIT(self->cm_callable);
+    return 0;
+}
+
+int BoxedClassmethod::clear(Box* _self) noexcept {
+    BoxedClassmethod* self = static_cast<BoxedClassmethod*>(_self);
+
+    Py_CLEAR(self->cm_callable);
+    return 0;
+}
+
+template <ExceptionStyle S>
+Box* wrapperDescrTppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1, Box* arg2,
+                         Box* arg3, Box** args, const std::vector<BoxedString*>* keyword_names) noexcept(S == CAPI) {
+    if (S == CAPI) {
+        try {
+            return wrapperDescrTppCall<CXX>(_self, NULL, argspec, arg1, arg2, arg3, args, keyword_names);
+        } catch (ExcInfo e) {
+            setCAPIException(e);
+            return NULL;
+        }
+    }
 
     if (rewrite_args) {
-        rewrite_args->rewriter->call(false, (void*)checkAndThrowCAPIException);
-        rewrite_args->out_success = true;
+        // We are going to embed references to _self->d_base->wrapper and _self->d_wrapped
+        rewrite_args->obj->addGuard((intptr_t)_self);
+        rewrite_args->rewriter->addGCReference(_self);
     }
 
-    return rtn;
-}
+    STAT_TIMER(t0, "us_timer_boxedwrapperdecsriptor_call", (_self->cls->is_user_defined ? 10 : 20));
 
-static Box* methodGetDoc(Box* b, void*) {
-    assert(b->cls == method_cls);
-    const char* s = static_cast<BoxedMethodDescriptor*>(b)->method->ml_doc;
-    if (s)
-        return boxString(s);
-    return None;
-}
+    assert(_self->cls == &PyWrapperDescr_Type);
+    PyWrapperDescrObject* self = reinterpret_cast<PyWrapperDescrObject*>(_self);
 
-Box* BoxedMethodDescriptor::__get__(BoxedMethodDescriptor* self, Box* inst, Box* owner) {
-    RELEASE_ASSERT(self->cls == method_cls, "");
+    int flags = self->d_base->flags;
+    wrapperfunc wrapper = self->d_base->wrapper;
 
-    // CPython handles this differently: they create the equivalent of different BoxedMethodDescriptor
-    // objects but with different class objects, which define different __get__ and __call__ methods.
-    if (self->method->ml_flags & METH_CLASS)
-        return boxInstanceMethod(owner, self, self->type);
-
-    if (self->method->ml_flags & METH_STATIC)
-        Py_FatalError("unimplemented");
-    if (self->method->ml_flags & METH_COEXIST)
-        Py_FatalError("unimplemented");
-
-    if (inst == None)
-        return self;
-    else
-        return boxInstanceMethod(inst, self, self->type);
-}
-
-void BoxedMethodDescriptor::gcHandler(GCVisitor* v, Box* _o) {
-    assert(_o->cls == method_cls);
-    BoxedMethodDescriptor* o = static_cast<BoxedMethodDescriptor*>(_o);
-
-    boxGCHandler(v, o);
-    v->visit(o->type);
-}
-
-Box* BoxedWrapperDescriptor::__get__(BoxedWrapperDescriptor* self, Box* inst, Box* owner) {
-    STAT_TIMER(t0, "us_timer_boxedwrapperdescriptor_get", 20);
-
-    RELEASE_ASSERT(self->cls == wrapperdescr_cls, "");
-
-    if (inst == None)
-        return self;
-
-    if (!isSubclass(inst->cls, self->type))
-        raiseExcHelper(TypeError, "Descriptor '' for '%s' objects doesn't apply to '%s' object",
-                       getFullNameOfClass(self->type).c_str(), getFullTypeName(inst).c_str());
-
-    return new BoxedWrapperObject(self, inst);
-}
-
-Box* BoxedWrapperDescriptor::descr_get(Box* _self, Box* inst, Box* owner) noexcept {
-    RELEASE_ASSERT(_self->cls == wrapperdescr_cls, "");
-    BoxedWrapperDescriptor* self = static_cast<BoxedWrapperDescriptor*>(_self);
-
-    if (inst == None)
-        return self;
-
-    if (!isSubclass(inst->cls, self->type)) {
-        PyErr_Format(TypeError, "Descriptor '' for '%s' objects doesn't apply to '%s' object",
-                     getFullNameOfClass(self->type).c_str(), getFullTypeName(inst).c_str());
-        return NULL;
-    }
-
-    return new BoxedWrapperObject(self, inst);
-}
-
-Box* BoxedWrapperDescriptor::__call__(BoxedWrapperDescriptor* descr, PyObject* self, BoxedTuple* args, Box** _args) {
-    RELEASE_ASSERT(descr->cls == wrapperdescr_cls, "");
-
-    BoxedDict* kw = static_cast<BoxedDict*>(_args[0]);
-
-    if (!isSubclass(self->cls, descr->type))
-        raiseExcHelper(TypeError, "descriptor '' requires a '%s' object but received a '%s'",
-                       getFullNameOfClass(descr->type).c_str(), getFullTypeName(self).c_str());
-
-    auto wrapper = new BoxedWrapperObject(descr, self);
-    return BoxedWrapperObject::__call__(wrapper, args, kw);
-}
-
-void BoxedWrapperDescriptor::gcHandler(GCVisitor* v, Box* _o) {
-    assert(_o->cls == wrapperdescr_cls);
-    BoxedWrapperDescriptor* o = static_cast<BoxedWrapperDescriptor*>(_o);
-
-    boxGCHandler(v, o);
-    v->visit(o->type);
-}
-
-static Box* wrapperdescrGetDoc(Box* b, void*) {
-    assert(b->cls == wrapperdescr_cls);
-    auto s = static_cast<BoxedWrapperDescriptor*>(b)->wrapper->doc;
-    assert(s.size());
-    return boxString(s);
-}
-
-Box* BoxedWrapperObject::__call__(BoxedWrapperObject* self, Box* args, Box* kwds) {
-    STAT_TIMER(t0, "us_timer_boxedwrapperobject_call", (self->cls->is_user_defined ? 10 : 20));
-
-    assert(self->cls == wrapperobject_cls);
-    assert(args->cls == tuple_cls);
-    assert(!kwds || kwds->cls == dict_cls);
-
-    int flags = self->descr->wrapper->flags;
-    wrapperfunc wrapper = self->descr->wrapper->wrapper;
-    assert(self->descr->wrapper->offset > 0);
-
-    Box* rtn;
+    ParamReceiveSpec paramspec(1, 0, true, false);
     if (flags == PyWrapperFlag_KEYWORDS) {
-        wrapperfunc_kwds wk = (wrapperfunc_kwds)wrapper;
-        rtn = (*wk)(self->obj, args, self->descr->wrapped, kwds);
+        paramspec = ParamReceiveSpec(1, 0, true, true);
     } else if (flags == PyWrapperFlag_PYSTON || flags == 0) {
-        rtn = (*wrapper)(self->obj, args, self->descr->wrapped);
+        paramspec = ParamReceiveSpec(1, 0, true, false);
+    } else if (flags == PyWrapperFlag_1ARG) {
+        paramspec = ParamReceiveSpec(1, 0, false, false);
+    } else if (flags == PyWrapperFlag_2ARG) {
+        paramspec = ParamReceiveSpec(2, 0, false, false);
     } else {
         RELEASE_ASSERT(0, "%d", flags);
     }
 
-    checkAndThrowCAPIException();
-    assert(rtn && "should have set + thrown an exception!");
-    return rtn;
+    auto continuation = [=](CallRewriteArgs* rewrite_args, Box* arg1, Box* arg2, Box* arg3, Box** args) {
+#ifndef NDEBUG
+        if (paramspec.takes_varargs)
+            assert(arg2 && arg2->cls == tuple_cls);
+#endif
+
+        Box* rtn;
+        if (flags == PyWrapperFlag_KEYWORDS) {
+            wrapperfunc_kwds wk = (wrapperfunc_kwds)wrapper;
+            rtn = (*wk)(arg1, arg2, self->d_wrapped, arg3);
+
+            if (rewrite_args) {
+                auto rewriter = rewrite_args->rewriter;
+                rewrite_args->out_rtn
+                    = rewriter->call(true, (void*)wk, rewrite_args->arg1, rewrite_args->arg2,
+                                     rewriter->loadConst((intptr_t)self->d_wrapped, Location::forArg(2)),
+                                     rewrite_args->arg3)->setType(RefType::OWNED);
+                rewrite_args->rewriter->checkAndThrowCAPIException(rewrite_args->out_rtn);
+                rewrite_args->out_success = true;
+            }
+        } else if (flags == PyWrapperFlag_PYSTON || flags == 0) {
+            rtn = (*wrapper)(arg1, arg2, self->d_wrapped);
+
+            if (rewrite_args) {
+                auto rewriter = rewrite_args->rewriter;
+                rewrite_args->out_rtn
+                    = rewriter->call(true, (void*)wrapper, rewrite_args->arg1, rewrite_args->arg2,
+                                     rewriter->loadConst((intptr_t)self->d_wrapped, Location::forArg(2)))
+                          ->setType(RefType::OWNED);
+                rewrite_args->rewriter->checkAndThrowCAPIException(rewrite_args->out_rtn);
+                rewrite_args->out_success = true;
+            }
+        } else if (flags == PyWrapperFlag_1ARG) {
+            wrapperfunc_1arg wrapper_1arg = (wrapperfunc_1arg)wrapper;
+            rtn = (*wrapper_1arg)(arg1, self->d_wrapped);
+
+            if (rewrite_args) {
+                auto rewriter = rewrite_args->rewriter;
+                rewrite_args->out_rtn
+                    = rewriter->call(true, (void*)wrapper, rewrite_args->arg1,
+                                     rewriter->loadConst((intptr_t)self->d_wrapped, Location::forArg(1)))
+                          ->setType(RefType::OWNED);
+                rewrite_args->rewriter->checkAndThrowCAPIException(rewrite_args->out_rtn);
+                rewrite_args->out_success = true;
+            }
+        } else if (flags == PyWrapperFlag_2ARG) {
+            rtn = (*wrapper)(arg1, arg2, self->d_wrapped);
+
+            if (rewrite_args) {
+                auto rewriter = rewrite_args->rewriter;
+                rewrite_args->out_rtn
+                    = rewriter->call(true, (void*)wrapper, rewrite_args->arg1, rewrite_args->arg2,
+                                     rewriter->loadConst((intptr_t)self->d_wrapped, Location::forArg(2)))
+                          ->setType(RefType::OWNED);
+                rewrite_args->rewriter->checkAndThrowCAPIException(rewrite_args->out_rtn);
+                rewrite_args->out_success = true;
+            }
+        } else {
+            RELEASE_ASSERT(0, "%d", flags);
+        }
+
+        if (S == CXX && !rtn)
+            throwCAPIException();
+        return rtn;
+    };
+
+    return callCXXFromStyle<S>([&]() {
+        return rearrangeArgumentsAndCall(paramspec, NULL, self->d_base->name, NULL, rewrite_args, argspec, arg1, arg2,
+                                         arg3, args, keyword_names, continuation);
+    });
 }
 
-Box* BoxedWrapperObject::tppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1, Box* arg2,
-                                 Box* arg3, Box** args, const std::vector<BoxedString*>* keyword_names) {
+template <ExceptionStyle S>
+Box* wrapperObjectTppCall(Box* _self, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1, Box* arg2,
+                          Box* arg3, Box** args, const std::vector<BoxedString*>* keyword_names) noexcept(S == CAPI) {
     STAT_TIMER(t0, "us_timer_boxedwrapperobject_call", (_self->cls->is_user_defined ? 10 : 20));
 
-    assert(_self->cls == wrapperobject_cls);
-    BoxedWrapperObject* self = static_cast<BoxedWrapperObject*>(_self);
+    assert(_self->cls == &wrappertype);
+    wrapperobject* self = reinterpret_cast<wrapperobject*>(_self);
 
-    int flags = self->descr->wrapper->flags;
-    wrapperfunc wrapper = self->descr->wrapper->wrapper;
-    assert(self->descr->wrapper->offset > 0);
+    RewriterVar* r_obj = NULL;
+    Box** new_args = NULL;
+    if (argspec.totalPassed() >= 3)
+        new_args = (Box**)alloca(sizeof(Box*) * (argspec.totalPassed() + 1 - 3));
 
-    if (rewrite_args && !rewrite_args->func_guarded) {
-        rewrite_args->obj->addAttrGuard(offsetof(BoxedWrapperObject, descr), (intptr_t)self->descr);
+    if (rewrite_args) {
+        r_obj = rewrite_args->obj->getAttr(offsetof(wrapperobject, self), Location::forArg(0));
     }
-
-    ParamReceiveSpec paramspec(0, 0, true, false);
-    if (flags == PyWrapperFlag_KEYWORDS) {
-        paramspec = ParamReceiveSpec(0, 0, true, true);
-    } else if (flags == PyWrapperFlag_PYSTON || flags == 0) {
-        paramspec = ParamReceiveSpec(0, 0, true, false);
-    } else {
-        RELEASE_ASSERT(0, "%d", flags);
-    }
-
-    Box* oarg1 = NULL;
-    Box* oarg2 = NULL;
-    Box* oarg3 = NULL;
-    Box** oargs = NULL;
-
-    bool rewrite_success = false;
-    rearrangeArguments(paramspec, NULL, self->descr->wrapper->name.data(), NULL, rewrite_args, rewrite_success, argspec,
-                       arg1, arg2, arg3, args, keyword_names, oarg1, oarg2, oarg3, oargs);
-
-    assert(oarg1 && oarg1->cls == tuple_cls);
-    if (!paramspec.takes_kwargs)
-        assert(oarg2 == NULL);
-    assert(oarg3 == NULL);
-    assert(oargs == NULL);
-
-    if (!rewrite_success)
-        rewrite_args = NULL;
-
-    Box* rtn;
-    if (flags == PyWrapperFlag_KEYWORDS) {
-        wrapperfunc_kwds wk = (wrapperfunc_kwds)wrapper;
-        rtn = (*wk)(self->obj, oarg1, self->descr->wrapped, oarg2);
-
-        if (rewrite_args) {
-            auto rewriter = rewrite_args->rewriter;
-            auto r_obj = rewrite_args->obj->getAttr(offsetof(BoxedWrapperObject, obj), Location::forArg(0));
-            rewrite_args->out_rtn = rewriter->call(
-                true, (void*)wk, r_obj, rewrite_args->arg1,
-                rewriter->loadConst((intptr_t)self->descr->wrapped, Location::forArg(2)), rewrite_args->arg2);
-            rewriter->call(false, (void*)checkAndThrowCAPIException);
-            rewrite_args->out_success = true;
-        }
-    } else if (flags == PyWrapperFlag_PYSTON || flags == 0) {
-        rtn = (*wrapper)(self->obj, oarg1, self->descr->wrapped);
-
-        if (rewrite_args) {
-            auto rewriter = rewrite_args->rewriter;
-            auto r_obj = rewrite_args->obj->getAttr(offsetof(BoxedWrapperObject, obj), Location::forArg(0));
-            rewrite_args->out_rtn
-                = rewriter->call(true, (void*)wrapper, r_obj, rewrite_args->arg1,
-                                 rewriter->loadConst((intptr_t)self->descr->wrapped, Location::forArg(2)));
-            rewriter->call(false, (void*)checkAndThrowCAPIException);
-            rewrite_args->out_success = true;
-        }
-    } else {
-        RELEASE_ASSERT(0, "%d", flags);
-    }
-
-    checkAndThrowCAPIException();
-    assert(rtn && "should have set + thrown an exception!");
-    return rtn;
+    ArgPassSpec new_argspec
+        = bindObjIntoArgs(self->self, r_obj, rewrite_args, argspec, arg1, arg2, arg3, args, new_args);
+    return wrapperDescrTppCall<S>((Box*)self->descr, rewrite_args, new_argspec, arg1, arg2, arg3, new_args,
+                                  keyword_names);
 }
 
-void BoxedWrapperObject::gcHandler(GCVisitor* v, Box* _o) {
-    assert(_o->cls == wrapperobject_cls);
-    BoxedWrapperObject* o = static_cast<BoxedWrapperObject*>(_o);
-
-    boxGCHandler(v, o);
-    v->visit(o->obj);
+extern "C" PyObject* PyStaticMethod_New(PyObject* callable) noexcept {
+    return new BoxedStaticmethod(callable);
 }
 
 void setupDescr() {
-    member_descriptor_cls->giveAttr("__get__", new BoxedFunction(boxRTFunction((void*)memberGet, UNKNOWN, 3)));
-    member_descriptor_cls->freeze();
+    property_cls->instances_are_nonzero = true;
 
-    property_cls->giveAttr("__init__",
-                           new BoxedFunction(boxRTFunction((void*)propertyInit, UNKNOWN, 5, 4, false, false,
-                                                           ParamNames({ "", "fget", "fset", "fdel", "doc" }, "", "")),
-                                             { NULL, NULL, NULL, NULL }));
-    property_cls->giveAttr("__get__", new BoxedFunction(boxRTFunction((void*)propertyGet, UNKNOWN, 3)));
-    property_cls->giveAttr("__set__", new BoxedFunction(boxRTFunction((void*)propertySet, UNKNOWN, 3)));
-    property_cls->giveAttr("__delete__", new BoxedFunction(boxRTFunction((void*)propertyDel, UNKNOWN, 2)));
-    property_cls->giveAttr("getter", new BoxedFunction(boxRTFunction((void*)propertyGetter, UNKNOWN, 2)));
-    property_cls->giveAttr("setter", new BoxedFunction(boxRTFunction((void*)propertySetter, UNKNOWN, 2)));
-    property_cls->giveAttr("deleter", new BoxedFunction(boxRTFunction((void*)propertyDeleter, UNKNOWN, 2)));
-    property_cls->giveAttr("fget",
-                           new BoxedMemberDescriptor(BoxedMemberDescriptor::OBJECT, offsetof(BoxedProperty, prop_get)));
-    property_cls->giveAttr("fset",
-                           new BoxedMemberDescriptor(BoxedMemberDescriptor::OBJECT, offsetof(BoxedProperty, prop_set)));
-    property_cls->giveAttr("fdel",
-                           new BoxedMemberDescriptor(BoxedMemberDescriptor::OBJECT, offsetof(BoxedProperty, prop_del)));
-    property_cls->giveAttr("__doc__",
-                           new BoxedMemberDescriptor(BoxedMemberDescriptor::OBJECT, offsetof(BoxedProperty, prop_doc)));
+    property_cls->giveAttr(
+        "__init__",
+        new BoxedFunction(BoxedCode::create((void*)propertyInit, UNKNOWN, 5, false, false, "property.__init__", "",
+                                            ParamNames({ "", "fget", "fset", "fdel", "doc" }, "", "")),
+                          { Py_None, Py_None, Py_None, NULL }));
+    property_cls->giveAttr("__get__",
+                           new BoxedFunction(BoxedCode::create((void*)propertyGet, UNKNOWN, 3, "property.__get__", "",
+                                                               ParamNames({ "self", "obj", "type" }, "", ""))));
+    property_cls->giveAttr("__set__",
+                           new BoxedFunction(BoxedCode::create((void*)propertySet, UNKNOWN, 3, "property.__set__", "",
+                                                               ParamNames({ "self", "obj", "value" }, "", ""))));
+    property_cls->giveAttr("__delete__",
+                           new BoxedFunction(BoxedCode::create((void*)propertyDel, UNKNOWN, 2, "property.__delete__",
+                                                               "", ParamNames({ "self", "obj" }, "", ""))));
+    property_cls->giveAttr("getter",
+                           new BoxedFunction(BoxedCode::create((void*)propertyGetter, UNKNOWN, 2, "property.getter")));
+    property_cls->giveAttr("setter",
+                           new BoxedFunction(BoxedCode::create((void*)propertySetter, UNKNOWN, 2, "property.setter")));
+    property_cls->giveAttr(
+        "deleter", new BoxedFunction(BoxedCode::create((void*)propertyDeleter, UNKNOWN, 2, "property.deleter")));
+    property_cls->giveAttrMember("fget", T_OBJECT, offsetof(BoxedProperty, prop_get));
+    property_cls->giveAttrMember("fset", T_OBJECT, offsetof(BoxedProperty, prop_set));
+    property_cls->giveAttrMember("fdel", T_OBJECT, offsetof(BoxedProperty, prop_del));
+    property_cls->giveAttrMember("__doc__", T_OBJECT, offsetof(BoxedProperty, prop_doc));
     property_cls->freeze();
 
-    staticmethod_cls->giveAttr("__init__",
-                               new BoxedFunction(boxRTFunction((void*)staticmethodInit, UNKNOWN, 5, 4, false, false),
-                                                 { None, None, None, None }));
-    staticmethod_cls->giveAttr(
-        "__get__", new BoxedFunction(boxRTFunction((void*)staticmethodGet, UNKNOWN, 3, 1, false, false), { None }));
+    staticmethod_cls->giveAttrMember("__func__", T_OBJECT, offsetof(BoxedStaticmethod, sm_callable));
+    staticmethod_cls->giveAttr("__init__", new BoxedFunction(BoxedCode::create((void*)staticmethodInit, UNKNOWN, 5,
+                                                                               false, false, "staticmethod.__init__"),
+                                                             { Py_None, Py_None, Py_None, Py_None }));
+    staticmethod_cls->giveAttr("__get__", new BoxedFunction(BoxedCode::create((void*)staticmethodGet, UNKNOWN, 3, false,
+                                                                              false, "staticmethod.__get__"),
+                                                            { Py_None }));
     staticmethod_cls->freeze();
 
 
-    classmethod_cls->giveAttr("__init__",
-                              new BoxedFunction(boxRTFunction((void*)classmethodInit, UNKNOWN, 5, 4, false, false),
-                                                { None, None, None, None }));
-    classmethod_cls->giveAttr(
-        "__get__", new BoxedFunction(boxRTFunction((void*)classmethodGet, UNKNOWN, 3, 1, false, false), { None }));
+    classmethod_cls->giveAttrMember("__func__", T_OBJECT, offsetof(BoxedClassmethod, cm_callable));
+    classmethod_cls->giveAttr("__init__", new BoxedFunction(BoxedCode::create((void*)classmethodInit, UNKNOWN, 5, false,
+                                                                              false, "classmethod.__init__"),
+                                                            { Py_None, Py_None, Py_None, Py_None }));
+    classmethod_cls->giveAttr("__get__", new BoxedFunction(BoxedCode::create((void*)classmethodGet, UNKNOWN, 3, false,
+                                                                             false, "classmethod.__get__"),
+                                                           { Py_None }));
     classmethod_cls->freeze();
 
-    method_cls->giveAttr("__get__",
-                         new BoxedFunction(boxRTFunction((void*)BoxedMethodDescriptor::__get__, UNKNOWN, 3)));
-    CLFunction* method_call_cl = boxRTFunction((void*)BoxedMethodDescriptor::__call__, UNKNOWN, 2, 0, true, true);
-    method_cls->giveAttr("__call__", new BoxedFunction(method_call_cl));
-    method_cls->tpp_call = BoxedMethodDescriptor::tppCall;
-    method_cls->giveAttr("__doc__", new (pyston_getset_cls) BoxedGetsetDescriptor(methodGetDoc, NULL, NULL));
-    method_cls->freeze();
+    PyType_Ready(&PyGetSetDescr_Type);
+    PyType_Ready(&PyMemberDescr_Type);
 
-    wrapperdescr_cls->giveAttr("__get__",
-                               new BoxedFunction(boxRTFunction((void*)BoxedWrapperDescriptor::__get__, UNKNOWN, 3)));
-    wrapperdescr_cls->giveAttr("__call__", new BoxedFunction(boxRTFunction((void*)BoxedWrapperDescriptor::__call__,
-                                                                           UNKNOWN, 2, 0, true, true)));
-    wrapperdescr_cls->giveAttr("__doc__",
-                               new (pyston_getset_cls) BoxedGetsetDescriptor(wrapperdescrGetDoc, NULL, NULL));
-    wrapperdescr_cls->freeze();
-    wrapperdescr_cls->tp_descr_get = BoxedWrapperDescriptor::descr_get;
+    wrappertype.tpp_call.capi_val = wrapperObjectTppCall<CAPI>;
+    wrappertype.tpp_call.cxx_val = wrapperObjectTppCall<CXX>;
+    wrappertype.tp_call = proxyToTppCall;
+    PyType_Ready(&wrappertype);
 
-    wrapperobject_cls->giveAttr(
-        "__call__", new BoxedFunction(boxRTFunction((void*)BoxedWrapperObject::__call__, UNKNOWN, 1, 0, true, true)));
-    wrapperobject_cls->tpp_call = BoxedWrapperObject::tppCall;
-    wrapperobject_cls->freeze();
-}
+    PyWrapperDescr_Type.tpp_call.capi_val = wrapperDescrTppCall<CAPI>;
+    PyWrapperDescr_Type.tpp_call.cxx_val = wrapperDescrTppCall<CXX>;
+    PyWrapperDescr_Type.tp_call = proxyToTppCall;
+    PyType_Ready(&PyWrapperDescr_Type);
 
-void teardownDescr() {
+    PyMethodDescr_Type.tpp_call.capi_val = methodDescrTppCall<CAPI>;
+    PyMethodDescr_Type.tpp_call.cxx_val = methodDescrTppCall<CXX>;
+    PyMethodDescr_Type.tp_call = proxyToTppCall;
+    PyType_Ready(&PyMethodDescr_Type);
+
+    PyClassMethodDescr_Type.tpp_call.capi_val = methodDescrTppCall<CAPI>;
+    PyClassMethodDescr_Type.tpp_call.cxx_val = methodDescrTppCall<CXX>;
+    PyClassMethodDescr_Type.tp_call = proxyToTppCall;
+    PyType_Ready(&PyClassMethodDescr_Type);
 }
 }

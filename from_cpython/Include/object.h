@@ -7,6 +7,10 @@ extern "C" {
 #endif
 
 
+// Pyston addition: refcounting annotations:
+#define BORROWED(...) __VA_ARGS__
+#define STOLEN(...) __VA_ARGS__
+
 /* Object and type object interface */
 
 /*
@@ -22,7 +26,6 @@ An object has a 'reference count' that is increased or decreased when a
 pointer to the object is copied or deleted; when the reference count
 reaches zero there are no references to the object left and it can be
 removed from the heap.
-[not true in Pyston]
 
 An object has a 'type' that determines what it represents and what kind
 of data it contains.  An object's type is fixed when it is created.
@@ -39,7 +42,6 @@ after allocation.  (These restrictions are made so a reference to an
 object can be simply a pointer -- moving an object would require
 updating all the pointers, and changing an object's size would require
 moving it if there was another object right next to it.)
-[This may not always be true in Pyston]
 
 Objects are always accessed through pointers of the type 'PyObject *'.
 The type 'PyObject' is a structure that only contains the reference count
@@ -65,11 +67,26 @@ whose size is determined when the object is allocated.
 #define Py_REF_DEBUG
 #endif
 
+// Pyston change: hacks to allow C++ features
+#ifndef _PYSTON_API
+typedef struct _object PyObject;
+typedef struct _varobject PyVarObject;
+#define Py_TYPE(ob)             (((PyObject*)(ob))->ob_type)
+#else
+namespace pyston {
+class Box;
+class BoxVar;
+}
+typedef pyston::Box PyObject;
+typedef pyston::BoxVar PyVarObject;
+#define Py_TYPE(ob)             ((ob)->cls)
+#endif
+
 #ifdef Py_TRACE_REFS
 /* Define pointers to support a doubly-linked list of all live heap objects. */
 #define _PyObject_HEAD_EXTRA            \
-    struct _object *_ob_next;           \
-    struct _object *_ob_prev;
+    PyObject *_ob_next;           \
+    PyObject *_ob_prev;
 
 #define _PyObject_EXTRA_INIT 0, 0,
 
@@ -79,15 +96,14 @@ whose size is determined when the object is allocated.
 #endif
 
 /* PyObject_HEAD defines the initial segment of every PyObject. */
-// Pyston change: removed ob_refcnt
 #define PyObject_HEAD                   \
     _PyObject_HEAD_EXTRA                \
+    Py_ssize_t ob_refcnt;               \
     struct _typeobject *ob_type;
 
-// Pyston change: removed '1', the initial refcount
 #define PyObject_HEAD_INIT(type)        \
     _PyObject_EXTRA_INIT                \
-    type,
+    1, type,
 
 #define PyVarObject_HEAD_INIT(type, size)       \
     PyObject_HEAD_INIT(type) size,
@@ -116,22 +132,8 @@ struct _varobject {
     PyObject_VAR_HEAD
 };
 
-// Pyston change: hacks to allow C++ features
-#ifndef _PYSTON_API
-typedef struct _object PyObject;
-typedef struct _varobject PyVarObject;
-#define Py_TYPE(ob)             (((PyObject*)(ob))->ob_type)
-#else
-namespace pyston {
-class Box;
-class BoxVar;
-}
-typedef pyston::Box PyObject;
-typedef pyston::BoxVar PyVarObject;
-#define Py_TYPE(ob)             ((ob)->cls)
-#endif
-
-// Pyston change: removed Py_REFCNT, moved Py_TYPE to above
+// Pyston change: moved Py_TYPE to above
+#define Py_REFCNT(ob)           (((PyObject*)(ob))->ob_refcnt)
 #define Py_SIZE(ob)             (((PyVarObject*)(ob))->ob_size)
 
 /*
@@ -188,8 +190,7 @@ typedef struct bufferinfo {
                              pointed to by strides in simple case.*/
     int readonly;
     int ndim;
-    // Pyston change: changed this from char* to const char*
-    const char *format;
+    PYSTON_CONST char *format;
     Py_ssize_t *shape;
     Py_ssize_t *strides;
     Py_ssize_t *suboffsets;
@@ -430,7 +431,9 @@ typedef PyObject *(*allocfunc)(PyTypeObject *, Py_ssize_t);
     destructor tp_del;\
                                                                                 \
     /* Type attribute cache version tag. Added in version 2.6 */\
-    unsigned int tp_version_tag;    \
+    /* Pyston change: change uint to 64bit uint
+    unsigned int tp_version_tag; */    \
+    PY_UINT64_T tp_version_tag;        \
 \
     /* Pyston changes: added these fields */ \
 
@@ -454,13 +457,13 @@ struct _typeobject {
 
     void* _hcls;
     void* _hcattrs;
-    char _ics[32];
-    void* _gcvisit_func;
+    char _ics[48];
     int _attrs_offset;
-    bool _flags[7];
+    char _flags[7]; // These are bools in C++
     void* _tpp_descr_get;
     void* _tpp_hasnext;
-    void* _tpp_call;
+    void* _tpp_call_capi;
+    void* _tpp_call_cxx;
 };
 
 /* The *real* layout of a type object when allocated on the heap */
@@ -510,7 +513,7 @@ PyAPI_FUNC(int) PyType_Ready(PyTypeObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyType_GenericAlloc(PyTypeObject *, Py_ssize_t) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyType_GenericNew(PyTypeObject *,
                                                PyObject *, PyObject *) PYSTON_NOEXCEPT;
-PyAPI_FUNC(PyObject *) _PyType_Lookup(PyTypeObject *, PyObject *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject *)) _PyType_Lookup(PyTypeObject *, PyObject *) PYSTON_NOEXCEPT;
 // Pyston change: modified this to take a const char*
 PyAPI_FUNC(PyObject *) _PyObject_LookupSpecial(PyObject *, const char *, PyObject **) PYSTON_NOEXCEPT;
 PyAPI_FUNC(unsigned int) PyType_ClearCache(void) PYSTON_NOEXCEPT;
@@ -535,6 +538,11 @@ PyAPI_FUNC(int) PyObject_HasAttrString(PyObject *, const char *) PYSTON_NOEXCEPT
 PyAPI_FUNC(PyObject *) PyObject_GetAttr(PyObject *, PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(int) PyObject_SetAttr(PyObject *, PyObject *, PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(int) PyObject_HasAttr(PyObject *, PyObject *) PYSTON_NOEXCEPT;
+// Pyston change: Add new APIs to access instance's dict
+PyAPI_FUNC(PyObject *) PyObject_GetDictCopy(PyObject *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(void) PyObject_ClearDict(PyObject *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(void) PyObject_UpdateDict(PyObject *, PyObject *) PYSTON_NOEXCEPT;
+
 PyAPI_FUNC(PyObject **) _PyObject_GetDictPtr(PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) PyObject_SelfIter(PyObject *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(PyObject *) _PyObject_NextNotImplemented(PyObject *) PYSTON_NOEXCEPT;
@@ -807,6 +815,9 @@ PyAPI_FUNC(void) _Py_PrintReferences(FILE *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) _Py_PrintReferenceAddresses(FILE *) PYSTON_NOEXCEPT;
 PyAPI_FUNC(void) _Py_AddToAllObjects(PyObject *, int force) PYSTON_NOEXCEPT;
 
+// Pyston addition:
+PyAPI_FUNC(void) _Py_PrintReferenceAddressesCapped(FILE *, int) PYSTON_NOEXCEPT;
+
 #else
 /* Without Py_TRACE_REFS, there's little enough to do that we expand code
  * inline.
@@ -823,9 +834,18 @@ PyAPI_FUNC(void) _Py_AddToAllObjects(PyObject *, int force) PYSTON_NOEXCEPT;
     (*Py_TYPE(op)->tp_dealloc)((PyObject *)(op)))
 #endif /* !Py_TRACE_REFS */
 
+#define Py_INCREF(op) (                         \
+    _Py_INC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
+    ((PyObject*)(op))->ob_refcnt++)
 
-#define Py_INCREF(op) ((void)(op))
-#define Py_DECREF(op) __asm volatile("" : : "X"(op))
+#define Py_DECREF(op)                                   \
+    do {                                                \
+        if (_Py_DEC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
+        --((PyObject*)(op))->ob_refcnt != 0)            \
+            _Py_CHECK_REFCNT(op)                        \
+        else                                            \
+        _Py_Dealloc((PyObject *)(op));                  \
+    } while (0)
 
 /* Safely decref `op` and set `op` to NULL, especially useful in tp_clear
  * and tp_dealloc implementatons.
@@ -871,9 +891,8 @@ PyAPI_FUNC(void) _Py_AddToAllObjects(PyObject *, int force) PYSTON_NOEXCEPT;
     } while (0)
 
 /* Macros to use in case the object pointer may be NULL: */
-// Pyston change: made these noops as well
-#define Py_XINCREF(op) ((void)(op))
-#define Py_XDECREF(op) __asm volatile("" : : "X"(op))
+#define Py_XINCREF(op) do { if ((op) == NULL) ; else Py_INCREF(op); } while (0)
+#define Py_XDECREF(op) do { if ((op) == NULL) ; else Py_DECREF(op); } while (0)
 
 /*
 These are provided as conveniences to Python runtime embedders, so that
@@ -888,9 +907,9 @@ where NULL (nil) is not suitable (since NULL often means 'error').
 
 Don't forget to apply Py_INCREF() when returning this value!!!
 */
-// Pyston change: replaced Py_None with just None
-PyAPI_DATA(PyObject*) None;
-#define Py_None None
+// Pyston change: replaced _Py_NoneStruct with pyston_None
+PyAPI_DATA(PyObject*) pyston_None;
+#define Py_None pyston_None
 //PyAPI_DATA(PyObject) _Py_NoneStruct; /* Don't use this directly */
 //#define Py_None (&_Py_NoneStruct)
 
@@ -1043,9 +1062,6 @@ PyAPI_FUNC(void) _PyTrash_thread_destroy_chain(void) PYSTON_NOEXCEPT;
 
 #define PyTrash_UNWIND_LEVEL 50
 
-// Pyston change: I don't think we need this since destructors
-// are run differently
-#if 0
 /* Note the workaround for when the thread state is NULL (issue #17703) */
 #define Py_TRASHCAN_SAFE_BEGIN(op) \
     do { \
@@ -1066,9 +1082,6 @@ PyAPI_FUNC(void) _PyTrash_thread_destroy_chain(void) PYSTON_NOEXCEPT;
         else \
             _PyTrash_thread_deposit_object((PyObject*)op); \
     } while (0);
-#endif
-#define Py_TRASHCAN_SAFE_BEGIN(op) do {
-#define Py_TRASHCAN_SAFE_END(op) } while (0);
 
 #ifdef __cplusplus
 }

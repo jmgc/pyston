@@ -8,8 +8,6 @@
 extern "C" {
 #endif
 
-// Pyston change: this is not our format
-#if 0
 typedef struct {
     PyObject_HEAD
     FILE *f_fp;
@@ -34,15 +32,8 @@ typedef struct {
     int readable;
     int writable;
 } PyFileObject;
-#endif
-typedef struct _PyFileObject PyFileObject;
 
-// Pyston change: use this to access the fp instead of ->f_fp
-PyAPI_FUNC(void) PyFile_SetFP(PyObject*, FILE*) PYSTON_NOEXCEPT;
-
-// Pyston change: this is no longer a static object
-PyAPI_DATA(PyTypeObject*) file_cls;
-#define PyFile_Type (*file_cls)
+PyAPI_DATA(PyTypeObject) PyFile_Type;
 
 #define PyFile_Check(op) PyObject_TypeCheck(op, &PyFile_Type)
 #define PyFile_CheckExact(op) (Py_TYPE(op) == &PyFile_Type)

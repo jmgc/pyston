@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,15 +43,27 @@ PyObject* mro_external(PyObject* self) noexcept;
 int type_set_bases(PyTypeObject* type, PyObject* value, void* context) noexcept;
 
 PyObject* slot_tp_richcompare(PyObject* self, PyObject* other, int op) noexcept;
+PyObject* slot_tp_iter(PyObject* self) noexcept;
 PyObject* slot_tp_iternext(PyObject* self) noexcept;
 PyObject* slot_tp_new(PyTypeObject* self, PyObject* args, PyObject* kwds) noexcept;
 PyObject* slot_mp_subscript(PyObject* self, PyObject* arg1) noexcept;
+int slot_mp_ass_subscript(PyObject* self, PyObject* key, PyObject* value) noexcept;
 int slot_sq_contains(PyObject* self, PyObject* value) noexcept;
 Py_ssize_t slot_sq_length(PyObject* self) noexcept;
 PyObject* slot_tp_getattr_hook(PyObject* self, PyObject* name) noexcept;
+PyObject* tp_new_wrapper(PyTypeObject* self, BoxedTuple* args, Box* kwds) noexcept;
+int slot_tp_init(PyObject* self, PyObject* args, PyObject* kwds) noexcept;
+int compatible_for_assignment(PyTypeObject* oldto, PyTypeObject* newto, const char* attr) noexcept;
 
 class GetattrRewriteArgs;
-Box* slotTpGetattrHookInternal(Box* self, BoxedString* attr, GetattrRewriteArgs* rewrite_args);
+template <ExceptionStyle S, Rewritable rewritable>
+Box* slotTpGetattrHookInternal(Box* self, BoxedString* attr, GetattrRewriteArgs* rewrite_args, bool for_call,
+                               BORROWED(Box**) bind_obj_out, RewriterVar** r_bind_obj_out) noexcept(S == CAPI);
+
+// Set a class's tp_call to this to have calls to tp_call (and __call__) proxy to tpp_call
+Box* proxyToTppCall(Box* self, Box* args, Box* kw) noexcept;
+
+int add_methods(PyTypeObject* type, PyMethodDef* meth) noexcept;
 }
 
 #endif

@@ -9,6 +9,7 @@ for i in xrange(1, 12):
         print i | j
         print i & j
         print i ^ j
+        print 1 | 2, 1 & 2, 1 & 2
 
 print (2).__int__()
 print (True).__int__()
@@ -38,6 +39,14 @@ class D(object):
     def __int__(self):
         return self.n
 
+
+class E(object):
+    def __int__(self):
+        print "__int__ called"
+        return 42
+
+print(chr(E()))
+
 for a in (False, True, 2, 3.0, D(4), D(C(5)), D(False)):
     i = int.__new__(C, a)
     print type(i), i, type(int(a))
@@ -63,6 +72,10 @@ print type(int(2L))
 print type(int.__new__(int, 2**100))
 print type(int.__new__(int, 2L))
 try:
+    print int(None)
+except TypeError, e:
+    print e
+try:
     print type(int.__new__(C, 2**100))
 except OverflowError, e:
     print e
@@ -77,6 +90,8 @@ print int("0b101", 2), int("0b101", 0)
 print 1 << 63, 1 << 64, -1 << 63, -1 << 64, 2 << 63
 print type(1 << 63), type(1 << 64), type(-1 << 63), type(-1 << 64), type(2 << 63)
 
+# TODO: enable this once intmethods_exceptions is working
+'''
 for b in range(26):
     try:
         print int('123', b)
@@ -86,6 +101,7 @@ for b in range(26):
         print int(u'123', b)
     except ValueError as e:
         print e
+'''
 
 
 class I(int):
@@ -138,3 +154,103 @@ print int(u"12938719238719827398172938712983791827938712987312", 16)
 print int(1e100)
 print int(*[1e100])
 print int(x=1e100)
+
+import sys
+min_int = -1 - sys.maxint
+max_int = sys.maxint
+
+print(min_int / 2)
+print(min_int / -2)
+print(min_int / 3)
+print(min_int / -3)
+print(min_int / 5)
+print(min_int / -5)
+print(min_int / 7)
+print(min_int / -7)
+
+print(max_int / 2)
+print(max_int / -2)
+print(-max_int / 2)
+print(max_int / 3)
+print(max_int / -3)
+print(-max_int / 3)
+print(max_int / 5)
+print(max_int / -5)
+print(-max_int / 5)
+print(max_int / 7)
+print(-max_int / 7)
+print(max_int / -7)
+
+try:
+    int(x=10, base=16)
+except TypeError as e:
+    print(e.message)
+
+if sys.version_info >= (2, 7, 6):
+    try:
+        int(base=16)
+    except TypeError as e:
+        print(e.message)
+else:
+    print("int() missing string argument")
+
+pow_test_data = [42, 3, 3L, 4.5, "x", 0, -42, None]
+
+for rhs in pow_test_data:
+    for lhs in pow_test_data:
+        for mod in pow_test_data:
+            try:
+                print(int.__rpow__(rhs, lhs, mod))
+            except Exception as e:
+                print(e.message)
+
+unary_test_data = [-42, -0, 0, 42, max_int, min_int]
+
+for i in unary_test_data:
+    print(int.__abs__(i))
+    print(int.__long__(i))
+    print(int.__float__(i))
+
+data = ["-1", "0", "1",
+        "5", "-5",
+        "5.0", "5L", "0L", "5+5j", "0.0",
+        "\"5\"", "None",
+        ]
+
+operations = ["__radd__",
+              "__rand__",
+              "__ror__",
+              "__rxor__",
+              "__rsub__",
+              "__rmul__",
+              "__rdiv__",
+              "__rfloordiv__",
+              "__rpow__",
+              "__rmod__",
+              "__rdivmod__",
+              "__rtruediv__",
+              "__rrshift__",
+              "__rlshift__",
+              "__coerce__",
+              ]
+
+for x in data:
+    for y in data:
+        for operation in operations:
+            try:
+                print(eval("int.{op}({arg1}, {arg2})".format(op=operation,
+                                                               arg1=x,
+                                                               arg2=y)))
+            except Exception as e:
+                print(e.message)
+
+for b in range(26):
+    try:
+        print int('123', b)
+    except ValueError as e:
+        print e
+    try:
+        print int(u'123', b)
+    except ValueError as e:
+        print e
+

@@ -424,8 +424,10 @@ StructUnionType_new(PyTypeObject *type, PyObject *args, PyObject *kwds, int isSt
         Py_DECREF((PyObject *)dict);
         return NULL;
     }
-    Py_DECREF(result->tp_dict);
-    result->tp_dict = (PyObject *)dict;
+    // Pyston change:
+    //Py_DECREF(result->tp_dict);
+    //result->tp_dict = (PyObject *)dict;
+    PyType_SetDict(result, (PyObject*)dict);
     dict->format = _ctypes_alloc_format_string(NULL, "B");
     if (dict->format == NULL) {
         Py_DECREF(result);
@@ -994,8 +996,10 @@ PyCPointerType_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF((PyObject *)stgdict);
         return NULL;
     }
-    Py_DECREF(result->tp_dict);
-    result->tp_dict = (PyObject *)stgdict;
+    // Pyston change:
+    //Py_DECREF(result->tp_dict);
+    //result->tp_dict = (PyObject *)stgdict;
+    PyType_SetDict(result, (PyObject*)stgdict);
 
     return (PyObject *)result;
 }
@@ -1460,8 +1464,10 @@ PyCArrayType_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF((PyObject *)stgdict);
         return NULL;
     }
-    Py_DECREF(result->tp_dict);
-    result->tp_dict = (PyObject *)stgdict;
+    // Pyston change:
+    //Py_DECREF(result->tp_dict);
+    //result->tp_dict = (PyObject *)stgdict;
+    PyType_SetDict(result, (PyObject*)stgdict);
 
     /* Special case for character arrays.
        A permanent annoyance: char arrays are also strings!
@@ -1839,9 +1845,9 @@ static PyObject *CreateSwappedType(PyTypeObject *type, PyObject *args, PyObject 
 
     if (suffix == NULL)
 #ifdef WORDS_BIGENDIAN
-        suffix = PyString_InternFromString("_le");
+        suffix = PyGC_RegisterStaticConstant(PyString_InternFromString("_le"));
 #else
-        suffix = PyString_InternFromString("_be");
+        suffix = PyGC_RegisterStaticConstant(PyString_InternFromString("_be"));
 #endif
 
     Py_INCREF(name);
@@ -1884,8 +1890,10 @@ static PyObject *CreateSwappedType(PyTypeObject *type, PyObject *args, PyObject 
         Py_DECREF((PyObject *)stgdict);
         return NULL;
     }
-    Py_DECREF(result->tp_dict);
-    result->tp_dict = (PyObject *)stgdict;
+    // Pyston change:
+    //Py_DECREF(result->tp_dict);
+    //result->tp_dict = (PyObject *)stgdict;
+    PyType_SetDict(result, (PyObject*)stgdict);
 
     return (PyObject *)result;
 }
@@ -2013,8 +2021,10 @@ PyCSimpleType_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF((PyObject *)stgdict);
         return NULL;
     }
-    Py_DECREF(result->tp_dict);
-    result->tp_dict = (PyObject *)stgdict;
+    // Pyston change:
+    //Py_DECREF(result->tp_dict);
+    //result->tp_dict = (PyObject *)stgdict;
+    PyType_SetDict(result, (PyObject*)stgdict);
 
     /* Install from_param class methods in ctypes base classes.
        Overrides the PyCSimpleType_from_param generic method.
@@ -2043,6 +2053,7 @@ PyCSimpleType_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
             ml = NULL;
             break;
         }
+
 
         if (ml) {
 #if (PYTHON_API_VERSION >= 1012)
@@ -2393,8 +2404,10 @@ PyCFuncPtrType_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF((PyObject *)stgdict);
         return NULL;
     }
-    Py_DECREF(result->tp_dict);
-    result->tp_dict = (PyObject *)stgdict;
+    // Pyston change:
+    //Py_DECREF(result->tp_dict);
+    //result->tp_dict = (PyObject *)stgdict;
+    PyType_SetDict(result, (PyObject*)stgdict);
 
     if (-1 == make_funcptrtype_dict(stgdict)) {
         Py_DECREF(result);
@@ -4709,7 +4722,7 @@ PyCArrayType_from_ctype(PyObject *itemtype, Py_ssize_t length)
     PyObject *len;
 
     if (cache == NULL) {
-        cache = PyDict_New();
+        cache = PyGC_RegisterStaticConstant(PyDict_New());
         if (cache == NULL)
             return NULL;
     }
@@ -4869,7 +4882,7 @@ Simple_repr(CDataObject *self)
     }
 
     if (format == NULL) {
-        format = PyString_InternFromString("%s(%r)");
+        format = PyGC_RegisterStaticConstant(PyString_InternFromString("%s(%r)"));
         if (format == NULL)
             return NULL;
     }
@@ -5574,7 +5587,7 @@ init_ctypes(void)
 
     PyModule_AddObject(m, "_pointer_type_cache", (PyObject *)_ctypes_ptrtype_cache);
 
-    _unpickle = PyObject_GetAttrString(m, "_unpickle");
+    _unpickle = PyGC_RegisterStaticConstant(PyObject_GetAttrString(m, "_unpickle"));
     if (_unpickle == NULL)
         return;
 

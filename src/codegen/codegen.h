@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ class TargetMachine;
 
 namespace pyston {
 
+class PystonObjectCache;
+
 class FunctionAddressRegistry {
 private:
     struct FuncInfo {
@@ -48,6 +50,7 @@ public:
     std::string getFuncNameAtAddress(void* addr, bool demangle, bool* out_success = NULL);
     llvm::Function* getLLVMFuncAtAddress(void* addr);
     void registerFunction(const std::string& name, void* addr, int length, llvm::Function* llvm_func);
+    void deregisterFunction(void* addr) { functions.erase(addr); }
     void dumpPerfMap();
 };
 
@@ -62,6 +65,7 @@ struct GlobalState {
     CompiledFunction* cur_cf;
     llvm::TargetMachine* tm;
     llvm::ExecutionEngine* engine;
+    PystonObjectCache* object_cache;
 
     std::vector<llvm::JITEventListener*> jit_listeners;
 
@@ -69,9 +73,9 @@ struct GlobalState {
     llvm::Type* llvm_value_type, *llvm_value_type_ptr, *llvm_value_type_ptr_ptr;
     llvm::Type* llvm_class_type, *llvm_class_type_ptr;
     llvm::Type* llvm_opaque_type;
-    llvm::Type* llvm_boxedstring_type_ptr, *llvm_dict_type_ptr, *llvm_aststmt_type_ptr;
+    llvm::Type* llvm_boxedstring_type_ptr, *llvm_dict_type_ptr;
     llvm::Type* llvm_frame_info_type;
-    llvm::Type* llvm_clfunction_type_ptr, *llvm_closure_type_ptr, *llvm_generator_type_ptr;
+    llvm::Type* llvm_code_type_ptr, *llvm_closure_type_ptr, *llvm_generator_type_ptr;
     llvm::Type* llvm_module_type_ptr, *llvm_bool_type_ptr;
     llvm::Type* llvm_excinfo_type;
     llvm::Type* i1, *i8, *i8_ptr, *i32, *i64, *void_, *double_;
@@ -86,8 +90,6 @@ extern GlobalState g;
 
 // in runtime_hooks.cpp:
 void initGlobalFuncs(GlobalState& g);
-
-DS_DECLARE_RWLOCK(codegen_rwlock);
 }
 
 #endif

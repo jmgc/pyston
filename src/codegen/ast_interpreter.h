@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,31 +23,36 @@ namespace gc {
 class GCVisitor;
 }
 
-class AST_expr;
-class AST_stmt;
-class AST_Jump;
+class BST_stmt;
+class BST_Jump;
 class Box;
 class BoxedClosure;
 class BoxedDict;
-struct CLFunction;
 struct LineInfo;
 
 extern const void* interpreter_instr_addr;
 
 struct ASTInterpreterJitInterface {
+    // Special value which when returned from the bjit will trigger a OSR.
+    static constexpr uint64_t osr_dummy_value = -1;
+
     static int getBoxedLocalsOffset();
+    static int getCreatedClosureOffset();
     static int getCurrentBlockOffset();
     static int getCurrentInstOffset();
+    static int getEdgeCountOffset();
     static int getGeneratorOffset();
     static int getGlobalsOffset();
 
     static void delNameHelper(void* _interpreter, InternedString name);
-    static Box* derefHelper(void* interp, InternedString s);
-    static Box* doOSRHelper(void* interp, AST_Jump* node);
+    static Box* derefHelper(void* interp, BST_LoadName* node);
     static Box* landingpadHelper(void* interp);
-    static Box* setExcInfoHelper(void* interp, Box* type, Box* value, Box* traceback);
-    static void setLocalClosureHelper(void* interp, long vreg, InternedString id, Box* v);
-    static Box* uncacheExcInfoHelper(void* interp);
+    static void pendingCallsCheckHelper();
+    static void setExcInfoHelper(void* interp, STOLEN(Box*) type, STOLEN(Box*) value, STOLEN(Box*) traceback);
+    static void setLocalClosureHelper(void* interp, int vreg, int closure_offset, Box* v);
+    static void uncacheExcInfoHelper(void* interp);
+    static void raise0Helper(void* interp) __attribute__((noreturn));
+    static Box* yieldHelper(void* interp, STOLEN(Box*) value);
 };
 
 class RewriterVar;
@@ -69,20 +74,18 @@ struct Value {
     Value(Box* o, RewriterVar* var) : o(o), var(var) {}
 };
 
-Box* astInterpretFunction(CLFunction* f, int nargs, Box* closure, Box* generator, Box* globals, Box* arg1, Box* arg2,
-                          Box* arg3, Box** args);
-Box* astInterpretFunctionEval(CLFunction* cf, Box* globals, Box* boxedLocals);
-Box* astInterpretDeopt(CLFunction* cf, AST_expr* after_expr, AST_stmt* enclosing_stmt, Box* expr_val,
-                       FrameStackState frame_state);
+Box* astInterpretFunction(BoxedCode* f, Box* closure, Box* generator, Box* globals, Box* arg1, Box* arg2, Box* arg3,
+                          Box** args);
+Box* astInterpretFunctionEval(BoxedCode* cf, Box* globals, Box* boxedLocals);
+// this function is implemented in the src/codegen/ast_interpreter_exec.S assembler file
+extern "C" Box* astInterpretDeopt(BoxedCode* cf, BST_stmt* enclosing_stmt, Box* expr_val,
+                                  STOLEN(FrameStackState) frame_state);
 
-AST_stmt* getCurrentStatementForInterpretedFrame(void* frame_ptr);
-Box* getGlobalsForInterpretedFrame(void* frame_ptr);
-CLFunction* getCLForInterpretedFrame(void* frame_ptr);
 struct FrameInfo;
 FrameInfo* getFrameInfoForInterpretedFrame(void* frame_ptr);
-BoxedClosure* passedClosureForInterpretedFrame(void* frame_ptr);
 
-BoxedDict* localsForInterpretedFrame(void* frame_ptr, bool only_user_visible);
+// Executes the equivalent of CPython's PRINT_EXPR opcode (call sys.displayhook)
+extern "C" void printExprHelper(Box* b);
 }
 
 #endif

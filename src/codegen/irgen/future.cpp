@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -67,12 +67,12 @@ inline bool is_stmt_string(AST_stmt* stmt) {
     return stmt->type == AST_TYPE::Expr && static_cast<AST_Expr*>(stmt)->value->type == AST_TYPE::Str;
 }
 
-FutureFlags getFutureFlags(std::vector<AST_stmt*> const& body, const char* file) {
+FutureFlags getFutureFlags(llvm::ArrayRef<AST_stmt*> body, const char* file) {
     FutureFlags ff = 0;
 
     // Set the defaults for the future flags depending on what version we are
     for (const std::pair<std::string, FutureOption>& p : future_options) {
-        if (PYTHON_VERSION_HEX >= p.second.mandatory_version_hex) {
+        if (PY_VERSION_HEX >= p.second.mandatory_version_hex) {
             ff |= p.second.ff_mask;
         }
     }
@@ -101,7 +101,7 @@ FutureFlags getFutureFlags(std::vector<AST_stmt*> const& body, const char* file)
                         raiseFutureImportErrorNotFound(file, alias, option_name.c_str());
                     } else {
                         const FutureOption& fo = iter->second;
-                        if (PYTHON_VERSION_HEX >= fo.optional_version_hex) {
+                        if (PY_VERSION_HEX >= fo.optional_version_hex) {
                             ff |= fo.ff_mask;
                         } else {
                             raiseFutureImportErrorNotFound(file, alias, option_name.c_str());

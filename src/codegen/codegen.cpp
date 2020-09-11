@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,66 +29,47 @@
 #include "analysis/scoping_analysis.h"
 #include "codegen/baseline_jit.h"
 #include "codegen/compvars.h"
-#include "core/ast.h"
+#include "core/bst.h"
+#include "core/cfg.h"
 #include "core/util.h"
+#include "runtime/types.h"
 
 namespace pyston {
 
-DS_DEFINE_RWLOCK(codegen_rwlock);
+void BoxedCode::addVersion(CompiledFunction* compiled) {
+    assert(compiled);
+    assert((compiled->spec != NULL) + (compiled->entry_descriptor != NULL) == 1);
+    assert(compiled->code_obj);
+    assert(compiled->code);
 
-CLFunction::CLFunction(int num_args, int num_defaults, bool takes_varargs, bool takes_kwargs,
-                       std::unique_ptr<SourceInfo> source)
-    : paramspec(num_args, num_defaults, takes_varargs, takes_kwargs),
-      source(std::move(source)),
-      param_names(this->source->ast, this->source->getInternedStrings()),
-      always_use_version(NULL),
-      code_obj(NULL),
-      times_interpreted(0),
-      internal_callable(NULL, NULL) {
-    assert(num_args >= num_defaults);
-}
-CLFunction::CLFunction(int num_args, int num_defaults, bool takes_varargs, bool takes_kwargs,
-                       const ParamNames& param_names)
-    : paramspec(num_args, num_defaults, takes_varargs, takes_kwargs),
-      source(nullptr),
-      param_names(param_names),
-      always_use_version(NULL),
-      code_obj(NULL),
-      times_interpreted(0),
-      internal_callable(NULL, NULL) {
-    assert(num_args >= num_defaults);
-}
+    if (compiled->entry_descriptor == NULL) {
+        bool could_have_speculations = (source.get() != NULL);
+        if (!could_have_speculations && compiled->effort == EffortLevel::MAXIMAL && compiled->spec->accepts_all_inputs
+            && compiled->spec->boxed_return_value
+            && (versions.size() == 0 || (versions.size() == 1 && !always_use_version.empty()))) {
+            always_use_version.get(compiled->exception_style) = compiled;
+        } else
+            assert(always_use_version.empty());
 
-SourceInfo::SourceInfo(BoxedModule* m, ScopingAnalysis* scoping, FutureFlags future_flags, AST* ast,
-                       std::vector<AST_stmt*> body, std::string fn)
-    : parent_module(m),
-      scoping(scoping),
-      future_flags(future_flags),
-      ast(ast),
-      cfg(NULL),
-      fn(std::move(fn)),
-      body(std::move(body)) {
-    assert(this->fn.size());
-
-    switch (ast->type) {
-        case AST_TYPE::ClassDef:
-        case AST_TYPE::Lambda:
-        case AST_TYPE::Module:
-        case AST_TYPE::Expression:
-        case AST_TYPE::Suite:
-            is_generator = false;
-            break;
-        case AST_TYPE::FunctionDef:
-            is_generator = containsYield(ast);
-            break;
-        default:
-            RELEASE_ASSERT(0, "Unknown type: %d", ast->type);
-            break;
+        assert(compiled->spec->arg_types.size() == numReceivedArgs());
+        versions.push_back(compiled);
+    } else {
+        osr_versions.push_back(compiled);
     }
 }
 
+SourceInfo::SourceInfo(BoxedModule* m, ScopingResults scoping, FutureFlags future_flags, int ast_type,
+                       bool is_generator)
+    : parent_module(m),
+      scoping(std::move(scoping)),
+      cfg(NULL),
+      future_flags(future_flags),
+      is_generator(is_generator),
+      ast_type(ast_type) {
+}
+
 SourceInfo::~SourceInfo() {
-    // TODO: release memory..
+    delete cfg;
 }
 
 void FunctionAddressRegistry::registerFunction(const std::string& name, void* addr, int length,
@@ -240,7 +221,6 @@ GlobalState::GlobalState() : context(llvm::getGlobalContext()), cur_module(NULL)
 llvm::JITEventListener* makeRegistryListener() {
     return new RegistryEventListener();
 }
-
 
 FunctionSpecialization::FunctionSpecialization(ConcreteCompilerType* rtn_type) : rtn_type(rtn_type) {
     accepts_all_inputs = true;

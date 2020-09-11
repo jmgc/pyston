@@ -173,8 +173,6 @@ Since we can't change the interface of a public API function, pend is
 still supported but now *officially* useless:  if pend is not NULL,
 *pend is set to NULL.
 **************************************************************************/
-// pyston change: comment this out
-#if 0
 PyObject *
 PyFloat_FromString(PyObject *v, char **pend)
 {
@@ -240,7 +238,6 @@ PyFloat_FromString(PyObject *v, char **pend)
 #endif
     return result;
 }
-#endif
 
 static void
 float_dealloc(PyFloatObject *op)
@@ -391,7 +388,7 @@ float_repr(PyFloatObject *v)
     return float_str_or_repr(v, 0, 'r');
 }
 
-static PyObject *
+PyObject *
 float_str(PyFloatObject *v)
 {
     return float_str_or_repr(v, PyFloat_STR_PRECISION, 'g');
@@ -412,9 +409,7 @@ float_str(PyFloatObject *v)
  * coercion to double.  So this part is painful too.
  */
 
-// Pyston change: don't need this for now
-#if 0
-static PyObject*
+PyObject*
 float_richcompare(PyObject *v, PyObject *w, int op)
 {
     double i, j;
@@ -627,7 +622,6 @@ float_richcompare(PyObject *v, PyObject *w, int op)
     Py_INCREF(Py_NotImplemented);
     return Py_NotImplemented;
 }
-#endif
 
 static long
 float_hash(PyFloatObject *v)
@@ -750,7 +744,8 @@ float_rem(PyObject *v, PyObject *w)
     return PyFloat_FromDouble(mod);
 }
 
-static PyObject *
+// pyston change: make this not static
+PyObject *
 float_divmod(PyObject *v, PyObject *w)
 {
     double vx, wx;
@@ -990,7 +985,8 @@ float_nonzero(PyFloatObject *v)
     return v->ob_fval != 0.0;
 }
 
-static int
+// pyston change: make not static
+int
 float_coerce(PyObject **pv, PyObject **pw)
 {
     if (PyInt_Check(*pw)) {
@@ -1123,8 +1119,6 @@ float_long(PyObject *v)
 #error "C doubles do not appear to be IEEE 754 binary64 format"
 #endif
 
-// pyston change: comment this out
-#if 0
 PyObject *
 _Py_double_round(double x, int ndigits) {
 
@@ -1261,7 +1255,6 @@ _Py_double_round(double x, int ndigits) {
     _Py_dg_freedtoa(buf);
     return result;
 }
-#endif
 
 #undef FIVE_POW_LIMIT
 
@@ -1891,7 +1884,7 @@ float_subtype_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     return newobj;
 }
 
-static PyObject *
+PyObject *
 float_getnewargs(PyFloatObject *v)
 {
     return Py_BuildValue("(d)", v->ob_fval);
@@ -1906,7 +1899,7 @@ typedef enum {
 static float_format_type double_format, float_format;
 static float_format_type detected_double_format, detected_float_format;
 
-static PyObject *
+PyObject *
 float_getformat(PyTypeObject *v, PyObject* arg)
 {
     char* s;
@@ -1955,7 +1948,8 @@ PyDoc_STRVAR(float_getformat_doc,
 "'unknown', 'IEEE, big-endian' or 'IEEE, little-endian' best describes the\n"
 "format of floating point numbers used by the C type named by typestr.");
 
-static PyObject *
+// pyston change: make not static
+PyObject *
 float_setformat(PyTypeObject *v, PyObject* args)
 {
     char* typestr;
@@ -2203,6 +2197,8 @@ PyTypeObject PyFloat_Type = {
     0,                                          /* tp_alloc */
     float_new,                                  /* tp_new */
 };
+// pyston change:
+#endif
 
 void
 _PyFloat_Init(void)
@@ -2258,6 +2254,8 @@ _PyFloat_Init(void)
         PyStructSequence_InitType(&FloatInfoType, &floatinfo_desc);
 }
 
+// pyston change: don't need this
+#if 0
 int
 PyFloat_ClearFreeList(void)
 {
@@ -2354,8 +2352,6 @@ PyFloat_Fini(void)
 }
 #endif
 
-// pyston change: comment this out
-#if 0
 /*----------------------------------------------------------------------------
  * _PyFloat_{Pack,Unpack}{4,8}.  See floatobject.h.
  */
@@ -2765,4 +2761,3 @@ _PyFloat_Unpack8(const unsigned char *p, int le)
         return x;
     }
 }
-#endif

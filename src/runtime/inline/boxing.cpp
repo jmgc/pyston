@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,6 +45,10 @@ extern "C" double unboxFloat(Box* b) {
 i64 unboxInt(Box* b) {
     ASSERT(b->cls == int_cls, "%s", getTypeName(b));
     return ((BoxedInt*)b)->n;
+}
+
+extern "C" bool hasnext(Box* o) {
+    return o->cls->tpp_hasnext(o);
 }
 
 // BoxedInt::BoxedInt(int64_t n) : Box(int_cls), n(n) {}

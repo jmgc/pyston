@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,12 +22,11 @@
 
 #include "codegen/ast_interpreter.h" // interpreter_instr_addr
 #include "codegen/unwinding.h"       // getCFForAddress
-#include "core/ast.h"
+#include "core/bst.h"
 #include "core/stats.h"        // StatCounter
 #include "core/types.h"        // for ExcInfo
 #include "core/util.h"         // Timer
 #include "runtime/generator.h" // generatorEntry
-#include "runtime/traceback.h" // BoxedTraceback::addLine
 
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
@@ -35,6 +34,7 @@
 #define PYSTON_CUSTOM_UNWINDER 1 // set to 0 to use C++ unwinder
 
 #define NORETURN __attribute__((__noreturn__))
+#define HIDDEN __attribute__((visibility("hidden")))
 
 // An action of 0 in the LSDA action table indicates cleanup.
 #define CLEANUP_ACTION 0
@@ -62,7 +62,7 @@
 #define DW_EH_PE_indirect 0x80
 // end dwarf encoding modes
 
-extern "C" void __gxx_personality_v0(); // wrong type signature, but that's ok, it's extern "C"
+extern "C" HIDDEN void __gxx_personality_v0(); // wrong type signature, but that's ok, it's extern "C"
 
 // check(EXPR) is like assert((EXPR) == 0), but evaluates EXPR even in debug mode.
 template <typename T> static inline void check(T x) {
@@ -73,10 +73,7 @@ namespace pyston {
 
 void checkExcInfo(const ExcInfo* exc) {
     assert(exc);
-    assert(exc->type && exc->value && exc->traceback);
-    ASSERT(gc::isValidGCObject(exc->type), "%p", exc->type);
-    ASSERT(gc::isValidGCObject(exc->value), "%p", exc->value);
-    ASSERT(gc::isValidGCObject(exc->traceback), "%p", exc->traceback);
+    assert(exc->type && exc->value);
 }
 
 static StatCounter us_unwind_loop("us_unwind_loop");
@@ -92,6 +89,11 @@ static thread_local Timer per_thread_cleanup_timer(-1);
 #ifndef NDEBUG
 static __thread bool in_cleanup_code = false;
 #endif
+static __thread int num_uncaught_exceptions = 0;
+
+bool isUnwinding() {
+    return num_uncaught_exceptions > 0;
+}
 
 extern "C" {
 
@@ -357,10 +359,10 @@ static void print_frame(unw_cursor_t* cursor, const unw_proc_info_t* pip) {
     }
 
     if (frame_type == INTERPRETED && cf && cur_stmt) {
-        auto source = cf->clfunc->source.get();
+        auto source = cf->code_obj->source.get();
         // FIXME: dup'ed from lineInfoForFrame
-        LineInfo line(cur_stmt->lineno, cur_stmt->col_offset, source->fn, source->getName());
-        printf("      File \"%s\", line %d, in %s\n", line.file.c_str(), line.line, line.func.c_str());
+        LineInfo line(cur_stmt->lineno, cf->code_obj->filename, cf->code_obj->name);
+        printf("      File \"%s\", line %d, in %s\n", line.file->c_str(), line.line, line.func->c_str());
     }
 }
 
@@ -561,12 +563,13 @@ static inline void unwind_loop(ExcInfo* exc_data) {
 
         int64_t switch_value = determine_action(&info, &entry);
         if (switch_value != CLEANUP_ACTION) {
-            // we're transfering control to a non-cleanup landing pad.
+            // we're transferring control to a non-cleanup landing pad.
             // i.e. a catch block.  thus ends our unwind session.
             endPythonUnwindSession(unwind_session);
 #if STAT_TIMERS
             pyston::StatTimer::finishOverride();
 #endif
+            pyston::num_uncaught_exceptions--;
         }
         static_assert(THREADING_USE_GIL, "have to make the unwind session usage in this file thread safe!");
         // there is a python unwinding implementation detail leaked
@@ -580,7 +583,7 @@ static inline void unwind_loop(ExcInfo* exc_data) {
         //
         // the only way this could bite us is if we somehow clobber
         // the PythonUnwindSession's storage, or cause a GC to occur, before
-        // transfering control to the landing pad in resume().
+        // transferring control to the landing pad in resume().
         //
         resume(&cursor, entry.landing_pad, switch_value, exc_data);
     }
@@ -611,11 +614,11 @@ void std::terminate() noexcept {
 }
 
 // wrong type signature, but that's okay, it's extern "C"
-extern "C" void __gxx_personality_v0() {
+extern "C" HIDDEN void __gxx_personality_v0() {
     RELEASE_ASSERT(0, "__gxx_personality_v0 should never get called");
 }
 
-extern "C" void _Unwind_Resume(struct _Unwind_Exception* _exc) {
+extern "C" HIDDEN void _Unwind_Resume(struct _Unwind_Exception* _exc) {
     assert(pyston::in_cleanup_code);
 #ifndef NDEBUG
     pyston::in_cleanup_code = false;
@@ -632,7 +635,7 @@ extern "C" void _Unwind_Resume(struct _Unwind_Exception* _exc) {
 // C++ ABI functionality
 namespace __cxxabiv1 {
 
-extern "C" void* __cxa_allocate_exception(size_t size) noexcept {
+extern "C" HIDDEN void* __cxa_allocate_exception(size_t size) noexcept {
     // we should only ever be throwing ExcInfos
     RELEASE_ASSERT(size == sizeof(pyston::ExcInfo), "allocating exception whose size doesn't match ExcInfo");
 
@@ -644,7 +647,7 @@ extern "C" void* __cxa_allocate_exception(size_t size) noexcept {
 
 // Takes the value that resume() sent us in RAX, and returns a pointer to the exception object actually thrown. In our
 // case, these are the same, and should always be &pyston::exception_ferry.
-extern "C" void* __cxa_begin_catch(void* exc_obj_in) noexcept {
+extern "C" HIDDEN void* __cxa_begin_catch(void* exc_obj_in) noexcept {
     assert(exc_obj_in);
     pyston::us_unwind_resume_catch.log(pyston::per_thread_resume_catch_timer.end());
 
@@ -656,7 +659,7 @@ extern "C" void* __cxa_begin_catch(void* exc_obj_in) noexcept {
     return e;
 }
 
-extern "C" void __cxa_end_catch() {
+extern "C" HIDDEN void __cxa_end_catch() {
     if (VERBOSITY("cxx_unwind") >= 4)
         printf("***** __cxa_end_catch() *****\n");
     // See comment in __cxa_begin_catch for why we don't clear the exception ferry here.
@@ -670,7 +673,7 @@ extern "C" std::type_info EXCINFO_TYPE_INFO;
 static uint64_t* unwinding_stattimer = pyston::Stats::getStatCounter("us_timer_unwinding");
 #endif
 
-extern "C" void __cxa_throw(void* exc_obj, std::type_info* tinfo, void (*dtor)(void*)) {
+extern "C" HIDDEN void __cxa_throw(void* exc_obj, std::type_info* tinfo, void (*dtor)(void*)) {
     static pyston::StatCounter num_cxa_throw("num_cxa_throw");
     num_cxa_throw.log();
 
@@ -684,15 +687,17 @@ extern "C" void __cxa_throw(void* exc_obj, std::type_info* tinfo, void (*dtor)(v
     pyston::ExcInfo* exc_data = (pyston::ExcInfo*)exc_obj;
     checkExcInfo(exc_data);
 
+    pyston::num_uncaught_exceptions++;
 #if STAT_TIMERS
     pyston::StatTimer::overrideCounter(unwinding_stattimer);
 #endif
+
     // let unwinding.cpp know we've started unwinding
-    pyston::throwingException(pyston::getActivePythonUnwindSession());
+    pyston::logException(exc_data);
     pyston::unwind(exc_data);
 }
 
-extern "C" void* __cxa_get_exception_ptr(void* exc_obj_in) noexcept {
+extern "C" HIDDEN void* __cxa_get_exception_ptr(void* exc_obj_in) noexcept {
     assert(exc_obj_in);
     pyston::ExcInfo* e = (pyston::ExcInfo*)exc_obj_in;
     checkExcInfo(e);
@@ -708,9 +713,31 @@ extern "C" void* __cxa_get_exception_ptr(void* exc_obj_in) noexcept {
 //         throw e;
 //     }
 //
-extern "C" void __cxa_rethrow() {
+extern "C" HIDDEN void __cxa_rethrow() {
     RELEASE_ASSERT(0, "__cxa_rethrow() unimplemented; please don't use bare `throw' in Pyston!");
 }
 }
-
 #endif // PYSTON_CUSTOM_UNWINDER
+
+namespace pyston {
+static llvm::StringMap<uint64_t> cxx_unwind_syms;
+uint64_t getCXXUnwindSymbolAddress(llvm::StringRef sym) {
+#if PYSTON_CUSTOM_UNWINDER
+    if (unlikely(cxx_unwind_syms.empty())) {
+        cxx_unwind_syms["_Unwind_Resume"] = (uint64_t)_Unwind_Resume;
+        cxx_unwind_syms["__gxx_personality_v0"] = (uint64_t)__gxx_personality_v0;
+        cxx_unwind_syms["__cxa_allocate_exception"] = (uint64_t)__cxxabiv1::__cxa_allocate_exception;
+        cxx_unwind_syms["__cxa_begin_catch"] = (uint64_t)__cxxabiv1::__cxa_begin_catch;
+        cxx_unwind_syms["__cxa_end_catch"] = (uint64_t)__cxxabiv1::__cxa_end_catch;
+        cxx_unwind_syms["__cxa_get_exception_ptr"] = (uint64_t)__cxxabiv1::__cxa_get_exception_ptr;
+        cxx_unwind_syms["__cxa_rethrow"] = (uint64_t)__cxxabiv1::__cxa_rethrow;
+        cxx_unwind_syms["__cxa_throw"] = (uint64_t)__cxxabiv1::__cxa_throw;
+    }
+
+    auto&& it = cxx_unwind_syms.find(sym);
+    if (it != cxx_unwind_syms.end())
+        return it->second;
+#endif
+    return 0;
+}
+}

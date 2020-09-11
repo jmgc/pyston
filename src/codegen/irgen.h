@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,33 +15,46 @@
 #ifndef PYSTON_CODEGEN_IRGEN_H
 #define PYSTON_CODEGEN_IRGEN_H
 
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ExecutionEngine/ObjectCache.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/ValueMap.h"
 
+#include "core/options.h"
 #include "core/types.h"
 
 namespace pyston {
 
-class AST_expr;
-class AST_stmt;
+class BST_stmt;
+class CFGBlock;
 class GCBuilder;
 class IREmitter;
 
 struct UnwindInfo {
 public:
-    AST_stmt* current_stmt;
+    BoxedCode* code;
+    BST_stmt* current_stmt;
+
     llvm::BasicBlock* exc_dest;
 
-    bool needsInvoke() { return exc_dest != NULL; }
+    // Frame handling changes a bit after a deopt happens.
+    bool is_after_deopt;
 
-    UnwindInfo(AST_stmt* current_stmt, llvm::BasicBlock* exc_dest) : current_stmt(current_stmt), exc_dest(exc_dest) {}
+    bool hasHandler() const { return exc_dest != NULL; }
+
+    UnwindInfo(BoxedCode* code, BST_stmt* current_stmt, llvm::BasicBlock* exc_dest, bool is_after_deopt = false)
+        : code(code), current_stmt(current_stmt), exc_dest(exc_dest), is_after_deopt(is_after_deopt) {}
+
+    ExceptionStyle preferredExceptionStyle() const;
 
     // Risky!  This means that we can't unwind from this location, and should be used in the
     // rare case that there are language-specific reasons that the statement should not unwind
     // (ex: loading function arguments into the appropriate scopes).
-    static UnwindInfo cantUnwind() { return UnwindInfo(NULL, NULL); }
+    static UnwindInfo cantUnwind() { return UnwindInfo(NULL, NULL, NULL); }
 };
 
 // TODO get rid of this
@@ -78,19 +91,44 @@ public:
 
     virtual llvm::Function* getIntrinsic(llvm::Intrinsic::ID) = 0;
 
-    virtual llvm::Value* createCall(UnwindInfo unw_info, llvm::Value* callee, const std::vector<llvm::Value*>& args)
-        = 0;
-    virtual llvm::Value* createCall(UnwindInfo unw_info, llvm::Value* callee) = 0;
-    virtual llvm::Value* createCall(UnwindInfo unw_info, llvm::Value* callee, llvm::Value* arg1) = 0;
-    virtual llvm::Value* createCall2(UnwindInfo unw_info, llvm::Value* callee, llvm::Value* arg1, llvm::Value* arg2)
-        = 0;
-    virtual llvm::Value* createCall3(UnwindInfo unw_info, llvm::Value* callee, llvm::Value* arg1, llvm::Value* arg2,
-                                     llvm::Value* arg3) = 0;
-    virtual llvm::Value* createIC(const ICSetupInfo* pp, void* func_addr, const std::vector<llvm::Value*>& args,
-                                  UnwindInfo unw_info) = 0;
+    // Special value for capi_exc_value that says that the target function always sets a capi exception.
+    static llvm::Value* ALWAYS_THROWS;
 
-    virtual Box* getIntConstant(int64_t n) = 0;
-    virtual Box* getFloatConstant(double d) = 0;
+    virtual llvm::Instruction* createCall(const UnwindInfo& unw_info, llvm::Value* callee,
+                                          const std::vector<llvm::Value*>& args,
+                                          ExceptionStyle target_exception_style = CXX,
+                                          llvm::Value* capi_exc_value = NULL) = 0;
+    virtual llvm::Instruction* createCall(const UnwindInfo& unw_info, llvm::Value* callee,
+                                          ExceptionStyle target_exception_style = CXX,
+                                          llvm::Value* capi_exc_value = NULL) = 0;
+    virtual llvm::Instruction* createCall(const UnwindInfo& unw_info, llvm::Value* callee, llvm::Value* arg1,
+                                          ExceptionStyle target_exception_style = CXX,
+                                          llvm::Value* capi_exc_value = NULL) = 0;
+    virtual llvm::Instruction* createCall2(const UnwindInfo& unw_info, llvm::Value* callee, llvm::Value* arg1,
+                                           llvm::Value* arg2, ExceptionStyle target_exception_style = CXX,
+                                           llvm::Value* capi_exc_value = NULL) = 0;
+    virtual llvm::Instruction* createCall3(const UnwindInfo& unw_info, llvm::Value* callee, llvm::Value* arg1,
+                                           llvm::Value* arg2, llvm::Value* arg3,
+                                           ExceptionStyle target_exception_style = CXX,
+                                           llvm::Value* capi_exc_value = NULL) = 0;
+    virtual llvm::Instruction* createIC(std::unique_ptr<const ICSetupInfo> pp, void* func_addr,
+                                        const std::vector<llvm::Value*>& args, const UnwindInfo& unw_info,
+                                        ExceptionStyle target_exception_style = CXX, llvm::Value* capi_exc_value = NULL)
+        = 0;
+
+    // virtual void checkAndPropagateCapiException(const UnwindInfo& unw_info, llvm::Value* returned_val,
+    // llvm::Value* exc_val, bool double_check = false) = 0;
+
+    virtual llvm::Value* createDeopt(BST_stmt* current_stmt, llvm::Value* node_value) = 0;
+
+    virtual BORROWED(Box*) getIntConstant(int64_t n) = 0;
+    virtual BORROWED(Box*) getFloatConstant(double d) = 0;
+
+    virtual llvm::Value* setType(llvm::Value* v, RefType reftype) = 0;
+    virtual llvm::Value* setNullable(llvm::Value* v, bool nullable) = 0;
+    virtual void refConsumed(llvm::Value* v, llvm::Instruction* inst) = 0;
+    virtual void refUsed(llvm::Value* v, llvm::Instruction* inst) = 0;
+    virtual ConcreteCompilerVariable* getNone() = 0;
 };
 
 extern const std::string CREATED_CLOSURE_NAME;
@@ -100,9 +138,11 @@ extern const std::string PASSED_GENERATOR_NAME;
 InternedString getIsDefinedName(InternedString name, InternedStringPool& interned_strings);
 bool isIsDefinedName(llvm::StringRef name);
 
-CompiledFunction* doCompile(CLFunction* clfunc, SourceInfo* source, ParamNames* param_names,
-                            const OSREntryDescriptor* entry_descriptor, EffortLevel effort,
-                            FunctionSpecialization* spec, std::string nameprefix);
+std::pair<CompiledFunction*, llvm::Function*> doCompile(BoxedCode* code, SourceInfo* source,
+                                                        const ParamNames* param_names,
+                                                        const OSREntryDescriptor* entry_descriptor, EffortLevel effort,
+                                                        ExceptionStyle exception_style, FunctionSpecialization* spec,
+                                                        llvm::StringRef nameprefix);
 
 // A common pattern is to branch based off whether a variable is defined but only if it is
 // potentially-undefined.  If it is potentially-undefined, we have to generate control-flow
@@ -123,19 +163,74 @@ llvm::Value* handlePotentiallyUndefined(ConcreteCompilerVariable* is_defined_var
                                         std::function<llvm::Value*(IREmitter&)> when_defined,
                                         std::function<llvm::Value*(IREmitter&)> when_undefined);
 
-class TypeRecorder;
 class OpInfo {
 private:
     const EffortLevel effort;
-    TypeRecorder* const type_recorder;
+    ICInfo* bjit_ic_info;
 
 public:
     const UnwindInfo unw_info;
 
-    OpInfo(EffortLevel effort, TypeRecorder* type_recorder, UnwindInfo unw_info)
-        : effort(effort), type_recorder(type_recorder), unw_info(unw_info) {}
+    OpInfo(EffortLevel effort, const UnwindInfo& unw_info, ICInfo* bjit_ic_info)
+        : effort(effort), bjit_ic_info(bjit_ic_info), unw_info(unw_info) {}
 
-    TypeRecorder* getTypeRecorder() const { return type_recorder; }
+    ICInfo* getBJitICInfo() const { return bjit_ic_info; }
+
+    ExceptionStyle preferredExceptionStyle() const { return unw_info.preferredExceptionStyle(); }
+};
+
+
+class PystonObjectCache : public llvm::ObjectCache {
+private:
+    llvm::SmallString<128> cache_dir;
+    std::string module_identifier;
+    std::string hash_before_codegen;
+
+public:
+    PystonObjectCache();
+
+
+#if LLVMREV < 216002
+    virtual void notifyObjectCompiled(const llvm::Module* M, const llvm::MemoryBuffer* Obj);
+#else
+    virtual void notifyObjectCompiled(const llvm::Module* M, llvm::MemoryBufferRef Obj);
+#endif
+
+#if LLVMREV < 215566
+    virtual llvm::MemoryBuffer* getObject(const llvm::Module* M);
+#else
+    virtual std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* M);
+#endif
+
+    void cleanupCacheDirectory();
+
+    void calculateModuleHash(const llvm::Module* M, EffortLevel effort);
+    bool haveCacheFileForHash();
+};
+
+class IRGenState;
+
+class RefcountTracker {
+private:
+    struct RefcountState {
+        RefType reftype = RefType::UNKNOWN;
+        bool nullable = false;
+
+        // llvm::SmallVector<llvm::Instruction*, 2> ref_consumers;
+    };
+    llvm::DenseMap<llvm::Instruction*, llvm::SmallVector<llvm::Value*, 4>> refs_consumed;
+    llvm::DenseMap<llvm::Instruction*, llvm::SmallVector<llvm::Value*, 4>> refs_used;
+    llvm::ValueMap<llvm::Value*, RefcountState> vars;
+    llvm::DenseSet<llvm::Instruction*> may_throw;
+
+public:
+    llvm::Value* setType(llvm::Value* v, RefType reftype);
+    llvm::Value* setNullable(llvm::Value* v, bool nullable = true);
+    void refConsumed(llvm::Value* v, llvm::Instruction*);
+    void refUsed(llvm::Value* v, llvm::Instruction*);
+    void setMayThrow(llvm::Instruction*);
+    static void addRefcounts(IRGenState* state);
+    bool isNullable(llvm::Value* v);
 };
 }
 

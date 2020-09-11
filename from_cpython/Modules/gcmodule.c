@@ -47,7 +47,7 @@ static struct gc_generation generations[NUM_GENERATIONS] = {
     {{{GEN_HEAD(2), GEN_HEAD(2), 0}},           10,             0},
 };
 
-PyGC_Head *_PyGC_generation0 = GEN_HEAD(0);
+PyGC_Head * const _PyGC_generation0 = GEN_HEAD(0);
 
 static int enabled = 1; /* automatic collection enabled? */
 
@@ -519,6 +519,8 @@ has_finalizer(PyObject *op)
 static void
 untrack_dicts(PyGC_Head *head)
 {
+    // Pyston change: skip this (see note in dict.cpp)
+#if 0
     PyGC_Head *next, *gc = head->gc.gc_next;
     while (gc != head) {
         PyObject *op = FROM_GC(gc);
@@ -527,6 +529,7 @@ untrack_dicts(PyGC_Head *head)
             _PyDict_MaybeUntrack(op);
         gc = next;
     }
+#endif
 }
 
 /* Move the objects in unreachable with __del__ methods into `finalizers`.
@@ -742,6 +745,8 @@ handle_weakrefs(PyGC_Head *unreachable, PyGC_Head *old)
 static void
 debug_instance(char *msg, PyInstanceObject *inst)
 {
+    Py_FatalError("unimplemented");
+#if 0
     char *cname;
     /* simple version of instance_repr */
     PyObject *classname = inst->in_class->cl_name;
@@ -751,6 +756,7 @@ debug_instance(char *msg, PyInstanceObject *inst)
         cname = "?";
     PySys_WriteStderr("gc: %.100s <%.100s instance at %p>\n",
                       msg, cname, inst);
+#endif
 }
 
 static void
@@ -763,6 +769,15 @@ debug_cycle(char *msg, PyObject *op)
         PySys_WriteStderr("gc: %.100s <%.100s %p>\n",
                           msg, Py_TYPE(op)->tp_name, op);
     }
+}
+
+PyObject* _PyGC_GetGarbage() {
+    if (garbage == NULL) {
+        garbage = PyList_New(0);
+        if (garbage == NULL)
+            Py_FatalError("gc couldn't create gc.garbage list");
+    }
+    return garbage;
 }
 
 /* Handle uncollectable garbage (cycles with finalizers, and stuff reachable
@@ -779,11 +794,9 @@ handle_finalizers(PyGC_Head *finalizers, PyGC_Head *old)
 {
     PyGC_Head *gc = finalizers->gc.gc_next;
 
-    if (garbage == NULL) {
-        garbage = PyList_New(0);
-        if (garbage == NULL)
-            Py_FatalError("gc couldn't create gc.garbage list");
-    }
+    if (garbage == NULL)
+        _PyGC_GetGarbage();
+
     for (; gc != finalizers; gc = gc->gc.gc_next) {
         PyObject *op = FROM_GC(gc);
 
@@ -866,6 +879,77 @@ get_time(void)
     return result;
 }
 
+#ifdef Py_TRACE_REFS
+// Similar to visit_decref, but changed to operate on all objects, not just
+// gc-tracked ones.
+static int
+visit_findleaks(PyObject *op, void *data) {
+    assert(op != NULL);
+    op->ob_refcnt--;
+    return 0;
+}
+
+extern PyObject refchain;
+
+// Pyston addition.  Mostly copied from collect() but stripped down a lot.
+void
+_PyGC_FindLeaks(PyObject** also)
+{
+    int i;
+    PyGC_Head *young; /* the generation we are examining */
+    int generation = NUM_GENERATIONS - 1;
+
+    /* merge younger generations with one we are currently collecting */
+    for (i = 0; i < generation; i++) {
+        gc_list_merge(GEN_HEAD(i), GEN_HEAD(generation));
+    }
+
+    /* handy references */
+    young = GEN_HEAD(generation);
+
+    traverseproc traverse;
+    PyGC_Head *gc = young->gc.gc_next;
+
+    while (*also) {
+        PyObject* o = *also;
+        traverse = Py_TYPE(o)->tp_traverse;
+        (void) traverse(o,
+                       (visitproc)visit_findleaks,
+                       NULL);
+        also++;
+    }
+    for (; gc != young; gc=gc->gc.gc_next) {
+        traverse = Py_TYPE(FROM_GC(gc))->tp_traverse;
+        (void) traverse(FROM_GC(gc),
+                       (visitproc)visit_findleaks,
+                       NULL);
+    }
+
+    PyObject* op;
+    fprintf(stderr, "Leaked references:\n");
+
+    for (op = refchain._ob_next; op != &refchain; op = op->_ob_next) {
+        if (op->ob_refcnt == 0)
+            continue;
+        if (Py_TYPE(op) == &PyString_Type)
+            fprintf(stderr, "%p [%" PY_FORMAT_SIZE_T "d] %s ('%.20s')     \033[40mwatch -l "
+                            "((PyObject*)%p)->ob_refcnt\033[0m\n",
+                    op, op->ob_refcnt, Py_TYPE(op)->tp_name, PyString_AS_STRING(op), op);
+        else if (Py_TYPE(op) == &PyInt_Type)
+            fprintf(stderr, "%p [%" PY_FORMAT_SIZE_T "d] %s (%ld)     \033[40mwatch -l "
+                            "((PyObject*)%p)->ob_refcnt\033[0m\n",
+                    op, op->ob_refcnt, Py_TYPE(op)->tp_name, PyInt_AsLong(op), op);
+        else if (Py_TYPE(op) == &PyType_Type)
+            fprintf(stderr, "%p [%" PY_FORMAT_SIZE_T "d] %s ('%s')     \033[40mwatch -l "
+                            "((PyObject*)%p)->ob_refcnt\033[0m\n",
+                    op, op->ob_refcnt, Py_TYPE(op)->tp_name, ((PyTypeObject*)op)->tp_name, op);
+        else
+            fprintf(stderr, "%p [%" PY_FORMAT_SIZE_T "d] %s     \033[40mwatch -l ((PyObject*)%p)->ob_refcnt\033[0m\n",
+                    op, op->ob_refcnt, Py_TYPE(op)->tp_name, op);
+    }
+}
+#endif
+
 /* This is the main function.  Read this to understand how the
  * collection process works. */
 static Py_ssize_t
@@ -885,6 +969,7 @@ collect(int generation)
         delstr = PyString_InternFromString("__del__");
         if (delstr == NULL)
             Py_FatalError("gc couldn't allocate \"__del__\"");
+        PyGC_RegisterStaticConstant(delstr);
     }
 
     if (debug & DEBUG_STATS) {
@@ -1021,8 +1106,10 @@ collect(int generation)
     }
 
     if (PyErr_Occurred()) {
-        if (gc_str == NULL)
+        if (gc_str == NULL) {
             gc_str = PyString_FromString("garbage collection");
+            PyGC_RegisterStaticConstant(gc_str);
+        }
         PyErr_WriteUnraisable(gc_str);
         Py_FatalError("unexpected exception during garbage collection");
     }
@@ -1399,6 +1486,7 @@ initgc(void)
         garbage = PyList_New(0);
         if (garbage == NULL)
             return;
+        PyGC_RegisterStaticConstant(garbage);
     }
     Py_INCREF(garbage);
     if (PyModule_AddObject(m, "garbage", garbage) < 0)
@@ -1414,6 +1502,8 @@ initgc(void)
         tmod = PyImport_ImportModuleNoBlock("time");
         if (tmod == NULL)
             PyErr_Clear();
+        else
+            PyGC_RegisterStaticConstant(tmod);
     }
 
 #define ADD_INT(NAME) if (PyModule_AddIntConstant(m, #NAME, NAME) < 0) return

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,39 +19,74 @@
 
 #include "codegen/codegen.h"
 
-#define UNW_LOCAL_ONLY
-#include <libunwind.h>
-#undef UNW_LOCAL_ONLY
+// Forward-declare libunwind's typedef'd unw_cursor_t:
+struct unw_cursor;
+typedef struct unw_cursor unw_cursor_t;
 
 namespace pyston {
 
 class Box;
 class BoxedDict;
 class BoxedModule;
-class BoxedTraceback;
 struct FrameInfo;
 
-void registerDynamicEhFrame(uint64_t code_addr, size_t code_size, uint64_t eh_frame_addr, size_t eh_frame_size);
+class RegisterEHFrame {
+private:
+    void* dyn_info;
+
+public:
+    RegisterEHFrame() : dyn_info(NULL) {}
+    ~RegisterEHFrame() { deregisterFrame(); }
+
+    // updates the EH info at eh_frame_addr to reference the passed code addr and code size and registers it
+    void updateAndRegisterFrameFromTemplate(uint64_t code_addr, size_t code_size, uint64_t eh_frame_addr,
+                                            size_t eh_frame_size);
+
+    void registerFrame(uint64_t code_addr, size_t code_size, uint64_t eh_frame_addr, size_t eh_frame_size);
+    void deregisterFrame();
+};
+
+void* registerDynamicEhFrame(uint64_t code_addr, size_t code_size, uint64_t eh_frame_addr, size_t eh_frame_size);
+void deregisterDynamicEhFrame(void* dyn_info);
+uint64_t getCXXUnwindSymbolAddress(llvm::StringRef sym);
+
+// use this instead of std::uncaught_exception.
+// Highly discouraged except for asserting -- we could be processing
+// a destructor with decref'd something and then we called into more
+// Python code.  So it's impossible to tell for instance, if a destructor
+// was called due to an exception or due to normal function termination,
+// since the latter can still return isUnwinding==true if there is an
+// exception up in the stack.
+#ifndef NDEBUG
+bool isUnwinding();
+#endif
 
 void setupUnwinding();
-BoxedModule* getCurrentModule();
-Box* getGlobals();     // returns either the module or a globals dict
-Box* getGlobalsDict(); // always returns a dict-like object
+BORROWED(BoxedModule*) getCurrentModule();
+BORROWED(Box*) getGlobals();     // returns either the module or a globals dict
+BORROWED(Box*) getGlobalsDict(); // always returns a dict-like object
 CompiledFunction* getCFForAddress(uint64_t addr);
-
-Box* getTraceback();
 
 class PythonUnwindSession;
 PythonUnwindSession* beginPythonUnwindSession();
 PythonUnwindSession* getActivePythonUnwindSession();
-void throwingException(PythonUnwindSession* unwind_session);
 void endPythonUnwindSession(PythonUnwindSession* unwind_session);
 void* getPythonUnwindSessionExceptionStorage(PythonUnwindSession* unwind_session);
 void unwindingThroughFrame(PythonUnwindSession* unwind_session, unw_cursor_t* cursor);
 
-void exceptionCaughtInInterpreter(LineInfo line_info, ExcInfo* exc_info);
+// TODO move these to exceptions.h
+void logException(ExcInfo* exc_info);
+bool& getIsReraiseFlag();
+inline void startReraise() {
+    getIsReraiseFlag() = true;
+}
+void exceptionAtLine(Box** traceback);
+void caughtCxxException(ExcInfo* exc_info);
+extern "C" void caughtCapiException();
+extern "C" void reraiseCapiExcAsCxx() __attribute__((noreturn));
 
-CLFunction* getTopPythonFunction();
+
+BoxedCode* getTopPythonFunction();
 
 // debugging/stat helper, returns python filename:linenumber, or "unknown:-1" if it fails
 std::string getCurrentPythonLine();
@@ -60,7 +95,7 @@ std::string getCurrentPythonLine();
 void logByCurrentPythonLine(const std::string& stat_name);
 
 // Adds stack locals and closure locals into the locals dict, and returns it.
-Box* fastLocalsToBoxedLocals();
+BORROWED(Box*) fastLocalsToBoxedLocals();
 
 class PythonFrameIteratorImpl;
 class PythonFrameIterator {
@@ -69,24 +104,11 @@ private:
 
 public:
     CompiledFunction* getCF();
-    CLFunction* getCL();
+    BoxedCode* getCode();
     FrameInfo* getFrameInfo();
     bool exists() { return impl.get() != NULL; }
-    AST_stmt* getCurrentStatement();
-    Box* fastLocalsToBoxedLocals();
-    Box* getGlobalsDict();
-
-    // Gets the "current version" of this frame: if the frame has executed since
-    // the iterator was obtained, the methods may return old values. This returns
-    // an updated copy that returns the updated values.
-    // The "current version" will live at the same stack location, but any other
-    // similarities need to be verified by the caller, ie it is up to the caller
-    // to determine that we didn't leave and reenter the stack frame.
-    // This function can only be called from the thread that created this object.
-    PythonFrameIterator getCurrentVersion();
-
-    // Assuming this is a valid frame iterator, return the next frame back (ie older).
-    PythonFrameIterator back();
+    BST_stmt* getCurrentStatement();
+    BORROWED(Box*) getGlobalsDict();
 
     PythonFrameIterator(PythonFrameIterator&& rhs);
     void operator=(PythonFrameIterator&& rhs);
@@ -94,11 +116,18 @@ public:
     ~PythonFrameIterator();
 };
 
-PythonFrameIterator getPythonFrame(int depth);
+FrameInfo* getPythonFrameInfo(int depth);
 
 // Fetches a writeable pointer to the frame-local excinfo object,
 // calculating it if necessary (from previous frames).
 ExcInfo* getFrameExcInfo();
+// A similar function, but that takes a pointer to the most-recent ExcInfo.
+// This is faster in the case that the frame-level excinfo is already up-to-date,
+// but just as slow if it's not.
+void updateFrameExcInfoIfNeeded(ExcInfo* latest);
+
+void addDecrefInfoEntry(uint64_t ip, std::vector<class Location> location);
+void removeDecrefInfoEntry(uint64_t ip);
 
 struct FrameStackState {
     // This includes all # variables (but not the ! ones).
@@ -121,7 +150,7 @@ FrameStackState getFrameStackState();
 struct DeoptState {
     FrameStackState frame_state;
     CompiledFunction* cf;
-    AST_stmt* current_stmt;
+    BST_stmt* current_stmt;
 };
 DeoptState getDeoptState();
 }

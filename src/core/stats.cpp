@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 #include <algorithm>
 
 #include "core/thread_utils.h"
-#include "gc/heap.h"
 
 namespace pyston {
 
@@ -104,9 +103,6 @@ void Stats::clear() {
 }
 
 void Stats::startEstimatingCPUFreq() {
-    if (!Stats::enabled)
-        return;
-
     clock_gettime(CLOCK_REALTIME, &Stats::start_ts);
     Stats::start_tick = getCPUTicks();
 }
@@ -129,8 +125,6 @@ void Stats::dump(bool includeZeros) {
     double cycles_per_us = Stats::estimateCPUFreq();
     fprintf(stderr, "Stats:\n");
     fprintf(stderr, "estimated_cpu_mhz: %5.5f\n", cycles_per_us);
-
-    gc::dumpHeapStatistics(0);
 
     fprintf(stderr, "Counters:\n");
 

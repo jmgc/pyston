@@ -371,7 +371,12 @@ class CCompiler:
             cc_args[:0] = ['-g']
         if before:
             cc_args[:0] = before
-        cc_args = cc_args + ["-Werror=implicit-function-declaration"]
+
+        # Pyston change:
+        if not any ('scipy' in s for s in pp_opts):
+            import sysconfig
+            if '-DNDEBUG' not in sysconfig.get_config_var('CFLAGS'):
+                cc_args = cc_args + ["-Werror=implicit-function-declaration"]
         return cc_args
 
     def _fix_compile_args(self, output_dir, macros, include_dirs):

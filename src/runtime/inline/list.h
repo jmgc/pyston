@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,38 +22,43 @@ namespace pyston {
 
 // TODO the inliner doesn't want to inline these; is there any point to having them in the inline section?
 inline void BoxedList::grow(int min_free) {
-    if (capacity == 0) {
+    if (allocated == 0) {
         const int INITIAL_CAPACITY = 8;
         int initial = std::max(INITIAL_CAPACITY, min_free);
         elts = new (initial) GCdArray();
-        capacity = initial;
+        allocated = initial;
     } else {
-        int new_capacity = std::max(capacity * 2, size + min_free);
-        elts = GCdArray::realloc(elts, new_capacity);
-        capacity = new_capacity;
+        int new_allocated = std::max(allocated * 2, size + min_free);
+        elts = GCdArray::grow(elts, new_allocated);
+        allocated = new_allocated;
     }
 }
 
 inline void BoxedList::ensure(int min_free) {
-    if (unlikely(size + min_free > capacity)) {
+    if (unlikely(size + min_free > allocated)) {
         grow(min_free);
     }
-    assert(capacity >= size + min_free);
+    assert(allocated >= size + min_free);
 }
 
 // TODO the inliner doesn't want to inline these; is there any point to having them in the inline section?
-extern "C" inline void listAppendInternal(Box* s, Box* v) {
+extern "C" inline void listAppendInternalStolen(Box* s, Box* v) {
     // Lock must be held!
 
-    assert(isSubclass(s->cls, list_cls));
+    assert(PyList_Check(s));
     BoxedList* self = static_cast<BoxedList*>(s);
 
-    assert(self->size <= self->capacity);
+    assert(self->size <= self->allocated || self->allocated == -1);
     self->ensure(1);
 
-    assert(self->size < self->capacity);
+    assert(self->size < self->allocated);
     self->elts->elts[self->size] = v;
     self->size++;
+}
+
+extern "C" inline void listAppendInternal(Box* s, Box* v) {
+    Py_INCREF(v);
+    listAppendInternalStolen(s, v);
 }
 }
 

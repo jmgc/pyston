@@ -74,7 +74,10 @@ PyAPI_DATA(PyTypeObject*) code_cls;
 #define PyCode_Type (*code_cls)
 
 #define PyCode_Check(op) (Py_TYPE(op) == &PyCode_Type)
-#define PyCode_GetNumFree(op) (PyTuple_GET_SIZE((op)->co_freevars))
+// Pyston change: disable this macro.
+// In Pyston the PyCodeObject is just an opaque pointer, get its size
+// directly will cause error.
+// #define PyCode_GetNumFree(op) (PyTuple_GET_SIZE((op)->co_freevars))
 
 /* Public interface */
 PyAPI_FUNC(PyCodeObject *) PyCode_New(
@@ -90,6 +93,12 @@ PyCode_NewEmpty(const char *filename, const char *funcname, int firstlineno) PYS
    in this code object.  If you just need the line number of a frame,
    use PyFrame_GetLineNumber() instead. */
 PyAPI_FUNC(int) PyCode_Addr2Line(PyCodeObject *, int) PYSTON_NOEXCEPT;
+
+// Pyston addition:
+PyAPI_FUNC(int) PyCode_GetArgCount(PyCodeObject *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject*)) PyCode_GetFilename(PyCodeObject *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(BORROWED(PyObject*)) PyCode_GetName(PyCodeObject *) PYSTON_NOEXCEPT;
+PyAPI_FUNC(int) PyCode_HasFreeVars(PyCodeObject* ) PYSTON_NOEXCEPT;
 
 /* for internal use only */
 #define _PyCode_GETCODEPTR(co, pp) \

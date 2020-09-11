@@ -1,4 +1,6 @@
 import os, sys, subprocess, shutil
+sys.path.append(os.path.dirname(__file__) + "/../lib")
+
 from test_helper import create_virtenv, run_test
 
 ENV_NAME = "protobuf_test_env_" + os.path.basename(sys.executable)
@@ -26,7 +28,12 @@ def install_and_test_protobuf():
     subprocess.check_call([PYTHON_EXE, "setup.py", "build"], cwd=PROTOBUF_PY_DIR, env=env)
 
     expected = [{"ran": 216}]
-    run_test([PYTHON_EXE, "setup.py", "test"], cwd=PROTOBUF_PY_DIR, expected=expected, env=env)
+    expected_log_hash = '''
+    gAAQSBxQEAxCwBwkAAREFCAUCQAAiAsIBggpNIQAAIBBBAAEAAQQAAADDEgABFI9QpcAlQAAgwEi
+    HEAJAESKkAKBGAAlpAAIAMggcAgAQQsQMwCkEgAisDKIAhEhABCMEE4CBAAEQQQAgIAIiIAEJBIy
+    gUBSkjAAIAUAQA8EIAI=
+    '''
+    run_test([PYTHON_EXE, "setup.py", "test"], cwd=PROTOBUF_PY_DIR, expected=expected, env=env, expected_log_hash=expected_log_hash)
 
 create_virtenv(ENV_NAME, None, force_create = True)
 install_and_test_protobuf()

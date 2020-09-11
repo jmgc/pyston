@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@
 #include <map>
 #include <vector>
 
+#include "core/cfg.h"
 #include "core/stringpool.h"
+#include "runtime/types.h"
 
 namespace llvm {
 class Function;
@@ -31,16 +33,25 @@ struct StackMap;
 
 class OSREntryDescriptor {
 private:
-    OSREntryDescriptor(CLFunction* clfunc, AST_Jump* backedge) : clfunc(clfunc), backedge(backedge) { assert(clfunc); }
+    OSREntryDescriptor(BoxedCode* code, BST_Jump* backedge, ExceptionStyle exception_style)
+        : code(code),
+          backedge(backedge),
+          exception_style(exception_style),
+          args(code->source->cfg->getVRegInfo().getTotalNumOfVRegs()),
+          potentially_undefined(code->source->cfg->getVRegInfo().getTotalNumOfVRegs()) {
+        assert(code);
+    }
 
 public:
-    CLFunction* clfunc;
-    AST_Jump* const backedge;
-    typedef std::map<InternedString, ConcreteCompilerType*> ArgMap;
+    BoxedCode* code;
+    BST_Jump* const backedge;
+    ExceptionStyle exception_style;
+    typedef VRegMap<ConcreteCompilerType*> ArgMap;
     ArgMap args;
+    VRegSet potentially_undefined;
 
-    static OSREntryDescriptor* create(CLFunction* clfunc, AST_Jump* backedge) {
-        return new OSREntryDescriptor(clfunc, backedge);
+    static OSREntryDescriptor* create(BoxedCode* code, BST_Jump* backedge, ExceptionStyle exception_style) {
+        return new OSREntryDescriptor(code, backedge, exception_style);
     }
 };
 

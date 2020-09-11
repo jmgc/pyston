@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 Dropbox, Inc.
+// Copyright (c) 2014-2016 Dropbox, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,28 +16,162 @@
 #define PYSTON_RUNTIME_REWRITEARGS_H
 
 #include "asm_writing/rewriter.h"
+#include "codegen/unwinding.h"
 
 namespace pyston {
 
-struct GetattrRewriteArgs {
+// We have have a couple different conventions for returning values from getattr-like functions.
+// For normal code we have just two conventions:
+// - the "normal" convention is that signalling the lack of an attribute is handled by throwing
+//   an exception (via either CAPI or C++ means).  This is the only convention that CPython has.
+// - our fast "no exception" convention which will return NULL and not throw an exception, not
+//   even a CAPI exception.
+//
+// Each function has a specific convention (most are "normal" and a couple of the inner-most ones
+// are "no-exception"), and the callers and callees can both know+adhere adhere to it.
+//
+// For the rewriter, there are a couple more cases, and we won't know which one we will have to
+// use until we get to that particular rewrite.  So the function will use 'out_return_convention' to
+// signal some information about the possible values out_rtn might represent. A future C++ exception can
+// usually still happen if any of these are signalled.
+// - There is always a valid attribute (HAS_RETURN).  out_rtn will be set and point to a non-null object.
+// - There is never an attribute (NO_RETURN).  out_rtn is null.
+// - There is a valid capi return (CAPI_RETURN).  out_rtn is set, and either points to a valid object,
+//   or will be a null value and a C exception is set.
+// - NOEXC_POSSIBLE.   out_rtn is set, and may point to a null value with no exception set.
+//
+// UNSPECIFIED is used as an invalid-default to make sure that we don't implicitly assume one
+// of the cases when the callee didn't explicitly signal one.
+//
+enum class ReturnConvention {
+    UNSPECIFIED,
+    HAS_RETURN,
+    NO_RETURN,
+    CAPI_RETURN,
+    NOEXC_POSSIBLE,
+    MAYBE_EXC,
+};
+
+class _ReturnConventionBase {
+private:
+    bool out_success;
+    RewriterVar* out_rtn;
+    ReturnConvention out_return_convention;
+#ifndef NDEBUG
+    bool return_convention_checked;
+#endif
+
+public:
+    _ReturnConventionBase()
+        : out_success(false),
+          out_rtn(NULL),
+          out_return_convention(ReturnConvention::UNSPECIFIED)
+#ifndef NDEBUG
+          ,
+          return_convention_checked(false)
+#endif
+    {
+    }
+
+#ifndef NDEBUG
+    ~_ReturnConventionBase() {
+        if (out_success && !isUnwinding())
+            assert(return_convention_checked && "Didn't check the return convention of this rewrite...");
+    }
+#endif
+
+    void setReturn(RewriterVar* out_rtn, ReturnConvention out_return_convention) {
+        assert(!out_success);
+        assert(out_return_convention != ReturnConvention::UNSPECIFIED);
+        assert((out_rtn == NULL) == (out_return_convention == ReturnConvention::NO_RETURN));
+        assert(out_return_convention != ReturnConvention::UNSPECIFIED);
+        assert(!return_convention_checked);
+        this->out_success = true;
+        this->out_rtn = out_rtn;
+        this->out_return_convention = out_return_convention;
+
+// I'm mixed on how useful this is; I like the extra checking, but changing the generated
+// assembly is risky:
+#ifndef NDEBUG
+        struct Checker {
+            static void call(Box* b, ReturnConvention r) {
+                if (r == ReturnConvention::HAS_RETURN) {
+                    assert(b);
+                    assert(!PyErr_Occurred());
+                } else if (r == ReturnConvention::CAPI_RETURN) {
+                    assert((bool)b ^ (bool)PyErr_Occurred());
+                } else if (r == ReturnConvention::MAYBE_EXC) {
+                    assert(b);
+                } else {
+                    assert(r == ReturnConvention::NOEXC_POSSIBLE);
+                }
+            }
+        };
+        if (out_rtn) {
+            auto rewriter = out_rtn->getRewriter();
+            rewriter->call(false, (void*)Checker::call, out_rtn, rewriter->loadConst((int)out_return_convention));
+        }
+#endif
+    }
+
+    // For convenience for use as rewrite_args->setReturn(other_rewrite_args->getReturn())
+    void setReturn(std::pair<RewriterVar*, ReturnConvention> p) { setReturn(p.first, p.second); }
+
+    void clearReturn() {
+        assert(out_success);
+        assert(return_convention_checked && "Didn't check the return convention of this rewrite...");
+        out_success = false;
+        out_rtn = NULL;
+        out_return_convention = ReturnConvention::UNSPECIFIED;
+#ifndef NDEBUG
+        return_convention_checked = false;
+#endif
+    }
+
+    RewriterVar* getReturn(ReturnConvention required_convention) {
+        assert(isSuccessful());
+        assert(this->out_return_convention == required_convention);
+#ifndef NDEBUG
+        return_convention_checked = true;
+#endif
+        return this->out_rtn;
+    }
+
+    void assertReturnConvention(ReturnConvention required_convention) {
+        assert(isSuccessful());
+        ASSERT(this->out_return_convention == required_convention, "user asked for convention %d but got %d",
+               static_cast<int>(required_convention), static_cast<int>((this->out_return_convention)));
+#ifndef NDEBUG
+        return_convention_checked = true;
+#endif
+    }
+
+    std::pair<RewriterVar*, ReturnConvention> getReturn() {
+        assert(isSuccessful());
+#ifndef NDEBUG
+        return_convention_checked = true;
+#endif
+        return std::make_pair(this->out_rtn, this->out_return_convention);
+    }
+
+    bool isSuccessful() {
+        assert(out_success == (out_return_convention != ReturnConvention::UNSPECIFIED));
+        return out_success;
+    }
+};
+
+class GetattrRewriteArgs : public _ReturnConventionBase {
+public:
     Rewriter* rewriter;
     RewriterVar* obj;
     Location destination;
 
-    bool out_success;
-    RewriterVar* out_rtn;
-
+public:
     bool obj_hcls_guarded;
     bool obj_shape_guarded; // "shape" as in whether there are hcls attrs and where they live
 
     GetattrRewriteArgs(Rewriter* rewriter, RewriterVar* obj, Location destination)
-        : rewriter(rewriter),
-          obj(obj),
-          destination(destination),
-          out_success(false),
-          out_rtn(NULL),
-          obj_hcls_guarded(false),
-          obj_shape_guarded(false) {}
+        : rewriter(rewriter), obj(obj), destination(destination), obj_hcls_guarded(false), obj_shape_guarded(false) {}
 };
 
 struct SetattrRewriteArgs {
@@ -60,7 +194,7 @@ struct DelattrRewriteArgs {
     DelattrRewriteArgs(Rewriter* rewriter, RewriterVar* obj) : rewriter(rewriter), obj(obj), out_success(false) {}
 };
 
-struct LenRewriteArgs {
+struct UnaryopRewriteArgs {
     Rewriter* rewriter;
     RewriterVar* obj;
     Location destination;
@@ -68,11 +202,12 @@ struct LenRewriteArgs {
     bool out_success;
     RewriterVar* out_rtn;
 
-    LenRewriteArgs(Rewriter* rewriter, RewriterVar* obj, Location destination)
+    UnaryopRewriteArgs(Rewriter* rewriter, RewriterVar* obj, Location destination)
         : rewriter(rewriter), obj(obj), destination(destination), out_success(false), out_rtn(NULL) {}
 };
 
-struct CallRewriteArgs {
+struct _CallRewriteArgsBase {
+public:
     Rewriter* rewriter;
     RewriterVar* obj;
     RewriterVar* arg1, *arg2, *arg3, *args;
@@ -80,10 +215,8 @@ struct CallRewriteArgs {
     bool args_guarded;
     Location destination;
 
-    bool out_success;
-    RewriterVar* out_rtn;
-
-    CallRewriteArgs(Rewriter* rewriter, RewriterVar* obj, Location destination)
+    _CallRewriteArgsBase(const _CallRewriteArgsBase& copy_from) = default;
+    _CallRewriteArgsBase(Rewriter* rewriter, RewriterVar* obj, Location destination)
         : rewriter(rewriter),
           obj(obj),
           arg1(NULL),
@@ -92,9 +225,27 @@ struct CallRewriteArgs {
           args(NULL),
           func_guarded(false),
           args_guarded(false),
-          destination(destination),
-          out_success(false),
-          out_rtn(NULL) {}
+          destination(destination) {}
+};
+
+struct CallRewriteArgs : public _CallRewriteArgsBase {
+public:
+    bool out_success;
+    RewriterVar* out_rtn;
+
+    CallRewriteArgs(Rewriter* rewriter, RewriterVar* obj, Location destination)
+        : _CallRewriteArgsBase(rewriter, obj, destination), out_success(false), out_rtn(NULL) {}
+
+    CallRewriteArgs(_CallRewriteArgsBase* copy_from)
+        : _CallRewriteArgsBase(*copy_from), out_success(false), out_rtn(NULL) {}
+};
+
+class CallattrRewriteArgs : public _CallRewriteArgsBase, public _ReturnConventionBase {
+public:
+    CallattrRewriteArgs(Rewriter* rewriter, RewriterVar* obj, Location destination)
+        : _CallRewriteArgsBase(rewriter, obj, destination) {}
+
+    CallattrRewriteArgs(_CallRewriteArgsBase* copy_from) : _CallRewriteArgsBase(*copy_from) {}
 };
 
 struct GetitemRewriteArgs {
@@ -141,21 +292,28 @@ struct CompareRewriteArgs {
         : rewriter(rewriter), lhs(lhs), rhs(rhs), destination(destination), out_success(false), out_rtn(NULL) {}
 };
 
-// Passes the output arguments back through oarg.  Passes the rewrite success by setting rewrite_success.
-// Directly modifies rewrite_args args in place, but only if rewrite_success got set.
-// oargs needs to be pre-allocated by the caller, since it's assumed that they will want to use alloca.
+using FunctorPointer
+    = llvm::function_ref<Box*(CallRewriteArgs* rewrite_args, Box* arg1, Box* arg2, Box* arg3, Box** args)>;
+
+// rearrangeArgumentsAndCall maps from a given set of arguments (the structure specified by an ArgPassSpec) to the
+// parameter form than the receiving function expects (given by the ParamReceiveSpec).  After it does this, it will
+// call `continuation` and return the result.
+//
 // The caller is responsible for guarding for paramspec, argspec, param_names, and defaults.
-// TODO Fix this function's signature.  should we pass back out through args?  the common case is that they
-// match anyway.  Or maybe it should call a callback function, which could save on the common case.
-void rearrangeArguments(ParamReceiveSpec paramspec, const ParamNames* param_names, const char* func_name,
-                        Box** defaults, CallRewriteArgs* rewrite_args, bool& rewrite_success, ArgPassSpec argspec,
-                        Box* arg1, Box* arg2, Box* arg3, Box** args, const std::vector<BoxedString*>* keyword_names,
-                        Box*& oarg1, Box*& oarg2, Box*& oarg3, Box** oargs);
+//
+// rearrangeArgumentsAndCall supports both CAPI- and CXX- exception styles for continuation, and will propagate them
+// back to the caller.  For now, it can also throw its own exceptions such as "not enough arguments", and will throw
+// them in the CXX style.
+Box* rearrangeArgumentsAndCall(ParamReceiveSpec paramspec, const ParamNames* param_names, const char* func_name,
+                               Box** defaults, CallRewriteArgs* rewrite_args, ArgPassSpec argspec, Box* arg1, Box* arg2,
+                               Box* arg3, Box** args, const std::vector<BoxedString*>* keyword_names,
+                               FunctorPointer continuation);
 
 // new_args should be allocated by the caller if at least three args get passed in.
 // rewrite_args will get modified in place.
-ArgPassSpec bindObjIntoArgs(Box* bind_obj, RewriterVar* r_bind_obj, CallRewriteArgs* rewrite_args, ArgPassSpec argspec,
-                            Box*& arg1, Box*& arg2, Box*& arg3, Box** args, Box** new_args);
+ArgPassSpec bindObjIntoArgs(Box* bind_obj, RewriterVar* r_bind_obj, _CallRewriteArgsBase* rewrite_args,
+                            ArgPassSpec argspec, Box*& arg1, Box*& arg2, Box*& arg3, Box** args, Box** new_args);
+
 } // namespace pyston
 
 #endif
